@@ -1,0 +1,327 @@
+## 16S analysis for the STB Project
+## @Xipeng Liu
+
+
+# 1. Prepare manifest table and metadata table
+# https://amplicon-docs.qiime2.org/en/stable/how-to-guides/how-to-import/
+# In the sample-metadata.tsv, need a column "Sample_or_Negative", to specify the negtaive controls.
+
+# Find the files
+iconv -f UTF-16 -t UTF-8 fq-manifest-dna.txt > fq-manifest-dna-utf8.tsv
+iconv -f UTF-16 -t UTF-8 fq-manifest-cdna.txt > fq-manifest-cdna-utf8.tsv
+
+
+
+
+# 2. Import data by demultiplexing sequences for qiime2  ####
+
+qiime tools import \
+ --type 'SampleData[PairedEndSequencesWithQuality]' \
+ --input-path fq-manifest-dna-utf8.tsv \
+ --output-path demux-dna.qza \
+ --input-format PairedEndFastqManifestPhred33V2
+
+qiime tools import \
+ --type 'SampleData[PairedEndSequencesWithQuality]' \
+ --input-path fq-manifest-cdna-utf8.tsv \
+ --output-path demux-cdna.qza \
+ --input-format PairedEndFastqManifestPhred33V2
+
+
+
+
+# 3. Trim Primers (V3-V4)  ####
+
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences demux-dna.qza \
+  --p-front-f CCTACGGGNGGCWGCAG \
+  --p-front-r GGACTACHVGGGTWTCTAAT \
+  --p-error-rate 0.15 \
+  --p-discard-untrimmed \
+  --p-cores 6 \
+  --o-trimmed-sequences trimmed-demux-dna.qza
+
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences demux-cdna.qza \
+  --p-front-f CCTACGGGNGGCWGCAG \
+  --p-front-r GGACTACHVGGGTWTCTAAT \
+  --p-error-rate 0.15 \
+  --p-discard-untrimmed \
+  --p-cores 6 \
+  --o-trimmed-sequences trimmed-demux-cdna.qza
+
+
+
+
+
+# 4. Summarize demultiplexed sequences  ####
+# For any "qzv" files, you can view it on https://view.qiime2.org/
+
+qiime demux summarize \
+  --i-data trimmed-demux-dna.qza \
+  --o-visualization trimmed-demux-dna.qzv
+
+qiime demux summarize \
+  --i-data trimmed-demux-cdna.qza \
+  --o-visualization trimmed-demux-cdna.qzv
+
+
+
+
+# 5. Sequence quality control using DADA2  ####
+# Read this for more details: https://amplicon-docs.qiime2.org/en/stable/tutorials/gut-to-soil/
+
+# DNA
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs trimmed-demux-dna.qza \
+  --p-trim-left-f 0 \
+  --p-trunc-len-f 280 \
+  --p-trim-left-r 0 \
+  --p-trunc-len-r 240 \
+  --p-n-threads 8 \
+  --o-representative-sequences rep-seqs-dna.qza \
+  --o-table asv-table-dna.qza \
+  --o-denoising-stats denoising-stats-dna.qza \
+  --o-base-transition-stats base-transition-stats-dna.qza
+
+# cDNA
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs trimmed-demux-cdna.qza \
+  --p-trim-left-f 0 \
+  --p-trunc-len-f 280 \
+  --p-trim-left-r 0 \
+  --p-trunc-len-r 240 \
+  --p-n-threads 8 \
+  --o-representative-sequences rep-seqs-cdna.qza \
+  --o-table asv-table-cdna.qza \
+  --o-denoising-stats denoising-stats-cdna.qza \
+  --o-base-transition-stats base-transition-stats-cdna.qza
+
+qiime metadata tabulate \
+  --m-input-file denoising-stats-dna.qza \
+  --o-visualization denoising-stats-dna.qzv
+
+qiime metadata tabulate \
+  --m-input-file denoising-stats-cdna.qza \
+  --o-visualization denoising-stats-cdna.qzv
+
+
+
+
+
+
+# 6. Taxonomic annotation  ####
+
+# The Silva is used because it can facilitate the removal of mitochondria,chloroplast,eukaryota from dataset.
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier /sps/leml/xliu/Database/qiime2_classifier/Silva_138_2_full_classifier.qza \
+  --i-reads rep-seqs-dna.qza \
+  --o-classification taxonomy-dna.qza \
+  --p-n-jobs 2
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier /sps/leml/xliu/Database/qiime2_classifier/Silva_138_2_full_classifier.qza \
+  --i-reads rep-seqs-cdna.qza \
+  --o-classification taxonomy-cdna.qza \
+   --p-n-jobs 2
+
+
+
+
+# 7. Remove mitochondria,chloroplast,eukaryota FOR asv-table and rep-seqs  ####
+
+qiime taxa filter-table \
+  --i-table asv-table-cdna.qza \
+  --i-taxonomy taxonomy-cdna.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-table asv-table-filtered-cdna.qza
+
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-cdna.qza \
+  --i-taxonomy taxonomy-cdna.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-sequences rep-seqs-filtered-cdna.qza
+
+qiime taxa filter-table \
+  --i-table asv-table-dna.qza \
+  --i-taxonomy taxonomy-dna.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-table asv-table-filtered-dna.qza
+
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-dna.qza \
+  --i-taxonomy taxonomy-dna.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-sequences rep-seqs-filtered-dna.qza
+
+# summarize
+qiime feature-table summarize \
+    --i-table asv-table-filtered-cdna.qza \
+    --o-feature-frequencies feature-frequencies-cdna.qza \
+    --o-sample-frequencies sample-frequencies-cdna.qza \
+    --o-summary asv-table-filtered-cdna.qzv
+
+qiime feature-table summarize \
+    --i-table asv-table-filtered-dna.qza \
+    --o-feature-frequencies feature-frequencies-dna.qza \
+    --o-sample-frequencies sample-frequencies-dna.qza \
+    --o-summary asv-table-filtered-dna.qzv
+
+
+
+
+# 8. Decontamination ####
+
+# DNA
+
+# Step 1: Identify suspected contaminants
+qiime quality-control decontam-identify \
+  --i-table asv-table-filtered-dna.qza \
+  --m-metadata-file sample-metadata-dna.tsv \
+  --p-method prevalence \
+  --p-prev-control-column sample_or_negative \
+  --p-prev-control-indicator negative \
+  --o-decontam-scores preva-decontam-scores-dna.qza
+
+# Step 2: Visualize suspected contaminants
+qiime quality-control decontam-score-viz \
+  --i-decontam-scores preva-decontam-scores-dna.qza \
+  --i-table asv-table-filtered-dna.qza \
+  --i-rep-seqs rep-seqs-filtered-dna.qza \
+  --p-threshold 0.5 \
+  --p-no-weighted \
+  --p-bin-size 0.05 \
+  --o-visualization decontam-score-viz-dna.qzv
+
+# Step 3: Remove suspected contaminants
+qiime feature-table filter-features \
+  --i-table asv-table-filtered-dna.qza \
+  --m-metadata-file preva-decontam-scores-dna.qza \
+  --p-where '[p]>0.5 OR [p] IS NULL' \
+  --o-filtered-table asv-table-decontam-dna.qza
+
+qiime feature-table filter-seqs \
+  --i-data rep-seqs-filtered-dna.qza \
+  --i-table asv-table-decontam-dna.qza \
+  --o-filtered-data rep-seqs-decontam-dna.qza
+
+
+# cDNA
+# Step 1: Identify suspected contaminants
+qiime quality-control decontam-identify \
+  --i-table asv-table-filtered-cdna.qza \
+  --m-metadata-file sample-metadata-cdna.tsv \
+  --p-method prevalence \
+  --p-prev-control-column sample_or_negative \
+  --p-prev-control-indicator negative \
+  --o-decontam-scores preva-decontam-scores-cdna.qza
+
+# Step 2: Visualize suspected contaminants
+qiime quality-control decontam-score-viz \
+  --i-decontam-scores preva-decontam-scores-cdna.qza \
+  --i-table asv-table-filtered-cdna.qza \
+  --i-rep-seqs rep-seqs-filtered-cdna.qza \
+  --p-threshold 0.5 \
+  --p-no-weighted \
+  --p-bin-size 0.05 \
+  --o-visualization decontam-score-viz-cdna.qzv
+
+# Step 3: Remove suspected contaminants
+qiime feature-table filter-features \
+  --i-table asv-table-filtered-cdna.qza \
+  --m-metadata-file preva-decontam-scores-cdna.qza \
+  --p-where '[p]>0.5 OR [p] IS NULL' \
+  --o-filtered-table asv-table-decontam-cdna.qza
+
+qiime feature-table filter-seqs \
+  --i-data rep-seqs-filtered-cdna.qza \
+  --i-table asv-table-decontam-cdna.qza \
+  --o-filtered-data rep-seqs-decontam-cdna.qza
+
+
+
+
+
+
+# 9. Merge multiple tables and clustering  ####
+# the overlap sum method combined reads from duplicate samples in both tables, best to have all unique samples
+
+qiime feature-table merge \
+ --i-tables asv-table-decontam-dna.qza \
+ --i-tables asv-table-decontam-cdna.qza \
+ --p-overlap-method sum \
+ --o-merged-table merged-table.qza
+
+# summarize the merged table to check if it worked well.
+qiime feature-table summarize \
+    --i-table merged-table.qza \
+    --o-feature-frequencies feature-frequencies-merged-table.qza \
+    --o-sample-frequencies sample-frequencies-merged-table.qza \
+    --o-summary asv-table-merged.qzv
+
+qiime feature-table merge-seqs \
+ --i-data rep-seqs-decontam-dna.qza \
+ --i-data rep-seqs-decontam-cdna.qza \
+ --o-merged-data merged-rep-seqs.qza
+
+
+# De novo clustering  ####
+# De novo clustering of a feature table can be performed as follows. In this work, clustering is performed at 99% identity to create OTUs.
+
+qiime vsearch cluster-features-de-novo \
+  --i-table merged-table.qza \
+  --i-sequences merged-rep-seqs.qza \
+  --p-perc-identity 0.99 \
+  --p-threads 8 \
+  --o-clustered-table table-dn-99.qza \
+  --o-clustered-sequences rep-seqs-dn-99.qza
+
+
+# Merged sample metadata for dna and rna dataset, exported to qzv to visualize output
+
+qiime feature-table summarize \
+    --i-table table-dn-99.qza \
+    --o-feature-frequencies feature-frequencies-table-dn-99.qza \
+    --o-sample-frequencies sample-frequencies-table-dn-99.qza \
+    --o-summary table-dn-99.qza.qzv
+
+
+
+
+
+# 10. Assign taxonomy and generate a phylogenetic tree
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier /sps/leml/xliu/Database/qiime2_classifier/Silva_138_2_full_classifier.qza \
+  --i-reads rep-seqs-dn-99.qza \
+  --o-classification taxonomy-dn-99.qza \
+  --p-n-jobs 2
+
+
+# Generate a tree
+
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs-dn-99.qza \
+  --p-n-threads 10 \
+  --o-alignment aligned-rep-seqs-dn3-99.qza \
+  --o-masked-alignment masked-aligned-rep-seqs-dn3-99.qza \
+  --o-tree unrooted-tree-dn3-99.qza \
+  --o-rooted-tree rooted-tree-dn3-99.qza
+
+
+
+
+
+# 11. Multi-rarefaction
+
+See R script: multi-rarefy.R
+
+
+
+
+# 12. 16S gene copy number correction
+
+See R script: predGCN.R
+
+
