@@ -1,6 +1,7 @@
 # GitHub Repository for
 # Microbial activity transitions underlie community stability following persistent warming
 By Xipeng Liu, A. Fina Bintarti, Margaux Buron, Milena Gonzalo, Ashley Shade*
+
 Université Lyon 1, CNRS, INRAE, LEM, UMR 5557, Villeurbanne, France
 *Correspondence to Ashley Shade: ashley.shade@cnrs.fr
 
