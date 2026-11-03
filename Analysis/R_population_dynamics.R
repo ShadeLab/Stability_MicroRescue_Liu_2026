@@ -3,585 +3,855 @@
 
 library(readr)
 library(tidyverse)
+library(dplyr)
+library(tidyr)
 
 library(vegan)
 library(phyloseq)
-
 library(lmerTest)
 library(performance)
 library(emmeans)
 library(ggpubr)
+library(dtw)
 
 library(patchwork)
 library(ggplot2)
 library(cowplot)
 library(ggalluvial)
 
+
+#********************************************####
+
+# Load data ####
+
+df_cell_count <- readRDS("logos/df_cell_count.rds")
+
+df_redox <- readRDS("logos/df_redox.rds")
+
+dna_gcn_rel <- readRDS(file = "phyloseq/otu_dna_GCN_corrected_relative.rds")
+
+metadata_dna = readRDS(file = "phyloseq/metadata_dna.rds")
+
+metadata_dna <- metadata_dna %>%
+  mutate(Microcosm = as.factor(paste(Group, Replicate, sep = "_")))
+
+
+pred.GCN <- readRDS("phyloseq/DNA_OTU_GCN_prediction.rds")
+
+pred.GCN <- pred.GCN$tab %>%
+  dplyr::transmute(
+    OTU=label,
+    GCN=x,
+    prob=probs
+  )
+
+
 #********************************************####
 
 # Change by interval (population) ####
+# rRNA vs rDNA relative ####
 
 ## Population level
 
-# filter extreme rare OTUs
-metadata_dna = readRDS(file = "phyloseq/metadata_dna.rds")
+
+## Load data
+dna_gcn_rel <- readRDS(
+  "phyloseq/otu_dna_GCN_corrected_relative.rds"
+)
+cdna_gcn_rel <- readRDS(
+  "phyloseq/otu_cdna_GCN_corrected_relative.rds"
+)
+metadata_dna <- readRDS(
+  "phyloseq/metadata_dna.rds"
+)
+
+otu_dna  <- as.matrix(dna_gcn_rel)
+otu_cdna <- as.matrix(cdna_gcn_rel)
+
+## Check and align taxa and samples
+stopifnot(
+  !is.null(rownames(otu_dna)),
+  !is.null(colnames(otu_dna)),
+  !is.null(rownames(otu_cdna)),
+  !is.null(colnames(otu_cdna))
+)
+
+stopifnot(setequal(rownames(otu_cdna), rownames(otu_dna)))
+stopifnot(setequal(colnames(otu_cdna), colnames(otu_dna)))
+
+#otu_cdna <- otu_cdna[rownames(otu_dna), colnames(otu_dna), drop = FALSE]
+
+
+## Align metadata
+metadata_dna <- as.data.frame(metadata_dna)
+
+metadata_dna <- metadata_dna %>%
+  mutate(Microcosm = as.factor(paste(Group, Replicate, sep = "_")))
+
+
+stopifnot(all(colnames(otu_dna) %in% rownames(metadata_dna)))
+
+metadata_dna <- metadata_dna[colnames(otu_dna), , drop = FALSE]
+
+stopifnot(all(rownames(metadata_dna) == colnames(otu_dna)))
+
+## Verify one sample per microcosm per day
+dup_samples <- metadata_dna %>%
+  count(Microcosm, Day) %>%
+  filter(n > 1)
+
+if (nrow(dup_samples) > 0) {
+  stop("Some Microcosm x Day combinations contain multiple samples.
+       Check whether Replicate identifies the true microcosm.")
+}
+
+## Prevalence filter: retain OTUs detected in >= 2 samples
+prev_cdna <- rowSums(otu_cdna > 0, na.rm = TRUE)
+prev_dna  <- rowSums(otu_dna > 0, na.rm = TRUE)
+
+keep_otu <- prev_cdna >= 2 & prev_dna >= 2
+
+otu_cdna <- otu_cdna[keep_otu, , drop = FALSE]
+otu_dna  <- otu_dna[keep_otu, , drop = FALSE]
+
+stopifnot(nrow(otu_dna) > 1)
+
+# to long format
+otu_to_long <- function(mat, value_name) {
+  as.data.frame(t(mat), check.names = FALSE) %>%
+    tibble::rownames_to_column("Sample_id") %>%
+    pivot_longer(-Sample_id, names_to = "OTU", values_to = value_name, values_drop_na = FALSE)
+}
+
+otu_dna_long <- otu_to_long(otu_dna, "rDNA") %>%
+  left_join(metadata_dna,
+            by = "Sample_id")
+
+otu_cdna_long <- otu_to_long(otu_cdna, "rRNA") %>%
+  select(Sample_id, OTU, rRNA = rRNA)
+
+otu_long <- inner_join(otu_dna_long, otu_cdna_long,
+                       by = c("Sample_id", "OTU")) %>%
+  mutate(Trajectory = as.character(Microcosm)) %>%
+  arrange(OTU, Trajectory, Day)%>%
+  mutate(Day = as.numeric(as.character(Day)))
+
+
+
+
+## Change by interval ####
+## calc_otu_interval
+calc_otu_interval <- function(df) {
+  pseudocount = 0
+  df %>%
+    group_by(OTU, Trajectory) %>%
+    arrange(Day, .by_group = TRUE) %>%
+    mutate(
+      Day_start = lag(Day), Day_end = Day,
+      interval = if_else(is.na(Day_start), NA_character_,
+                         paste0(Day_start, "-", Day_end)),
+      dt = Day_end - Day_start,
+      rDNA_start = lag(rDNA),
+      rDNA_end = rDNA,
+      rRNA_start = lag(rRNA),
+      rRNA_end = rRNA,
+      log2FC_rDNA = log2((rDNA + pseudocount) /
+                           (lag(rDNA) + pseudocount)),
+      log2FC_rRNA = log2((rRNA + pseudocount) /
+                           (lag(rRNA) + pseudocount))
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(interval), dt > 0)
+}
+
+# calculation
+otu_change_interval <- calc_otu_interval(otu_long)
+
+# 
+otu_change_interval_res <- otu_change_interval %>% 
+  filter(!is.na(log2FC_rDNA), !is.na(log2FC_rRNA),
+         rDNA_start > 0, rDNA_end > 0, rRNA_start > 0, rRNA_end > 0)%>%
+  mutate(log_rDNA_start = log2(rDNA_start),
+         log_rRNA_start = log2(rRNA_start),)
+
+
+
+
+### linear mixed-effects model ####
+model <- lmer(log2FC_rRNA ~ log2FC_rDNA * Season * Site_type +
+                (1 | Trajectory) + (1 | interval) +
+                (0 + log2FC_rDNA | Trajectory:interval),
+              data = otu_change_interval_res, REML = TRUE)
+
+VarCorr(model)
+
+anova(model)
+
+r2(model)
+
+summary(model)
+
+emtrends(model, ~ Season * Site_type, var = "Stability_all_rDNA")
+
+
+
+
+p6.1 <- ggplot(otu_change_interval_res,
+               aes(log2FC_rDNA, log2FC_rRNA)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_hex(bins = 40) +
+  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
+  geom_smooth(aes(color = Site_type, linetype = Season), 
+              method = "lm", se = FALSE, alpha = 0.9, linewidth = 1.5) +
+  stat_regline_equation(label.y.npc = 1, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.9, p.accuracy = 0.001,
+           aes(label = paste(after_stat(r.label), 
+                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
+                             sep = "~`,`~")))+
+  labs(x = "Change in\nrDNA abundance (by interval)",
+       y = "Change in\nrRNA abundance (by interval)",
+       title = "Population level")+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
+                     values = c("#b35806","#762a83","#01665e"))+
+  #facet_wrap(~interval)+
+  theme_bw() +
+  theme(panel.background=element_rect(fill='white', color='black'),
+        plot.title = element_text(size=17),
+        axis.title.x =element_text(size=17, color='black', hjust = 0.5),
+        axis.title.y=element_text(size=17, color='black'),
+        axis.text.x =element_text(size=13, color='black'), 
+        axis.text.y=element_text(size=13, color='black')) +
+  theme(strip.text = element_text(size = 15, color = "black"))+
+  theme(legend.text=element_text(size=15, color='black'),
+        legend.title=element_text(size=15, color='black'),
+        legend.key = element_blank(),
+        legend.position = "none")+
+  guides(color = guide_legend(override.aes = list(size = 4)),
+         shape = guide_legend(override.aes = list(size = 4)),
+         size = guide_legend(title = "Time interval (Day)"))
+
+p6.1
+
+
+
+
+
+
+## Stability ####
+otu_cdna <- otu_cdna[keep_otu, , drop = FALSE]
+otu_dna  <- otu_dna[keep_otu, , drop = FALSE]
+
+table_DNA  <- as.matrix(dna_gcn_rel)
+table_RNA <- as.matrix(cdna_gcn_rel)
+
+## Prevalence filter: retain OTUs detected in >= 2 samples
+prev_cdna <- rowSums(table_RNA > 0, na.rm = TRUE)
+prev_dna  <- rowSums(table_DNA > 0, na.rm = TRUE)
+
+keep_otu <- prev_cdna >= 2 & prev_dna >= 2
+
+table_RNA <- table_RNA[keep_otu, , drop = FALSE]
+table_DNA  <- table_DNA[keep_otu, , drop = FALSE]
+
+
+# Check that all metadata samples exist in both tables
+metadata_dna <- as.data.frame(metadata_dna)
+
+metadata_dna <- metadata_dna %>%
+  mutate(Microcosm = as.factor(paste(Group, Replicate, sep = "_")))
+
+stopifnot(all(metadata_dna$Sample_id %in% colnames(table_DNA)))
+stopifnot(all(metadata_dna$Sample_id %in% colnames(table_RNA)))
+
+
+# rDNA table
+df_DNA <- as.data.frame(otu_dna) %>%
+  rownames_to_column("OTU") %>%
+  pivot_longer(
+    cols = -OTU,
+    names_to = "Sample_id",
+    values_to = "Abundance"
+  ) %>%
+  left_join(metadata_dna, by = "Sample_id") %>%
+  mutate(Data_type = "rDNA")
+
+df_RNA <- as.data.frame(otu_cdna) %>%
+  rownames_to_column("OTU") %>%
+  pivot_longer(
+    cols = -OTU,
+    names_to = "Sample_id",
+    values_to = "Abundance"
+  ) %>%
+  left_join(metadata_dna, by = "Sample_id") %>%
+  mutate(Data_type = "rRNA")
+
+# Combine rDNA and rRNA
+df_otu <- bind_rows(df_DNA, df_RNA) %>%
+  filter(!is.na(Microcosm), !is.na(Day)) %>%
+  mutate(Abundance = ifelse(is.nan(Abundance), NA_real_, Abundance))
+
+# calculate stability
+stability_otu <- df_otu %>%
+  filter(Day %in% c(0, 3, 6, 9, 15, 21, 27)) %>%
+  group_by(Data_type, Group, Microcosm, OTU) %>%
+  summarise(
+    n_nonNA = sum(!is.na(Abundance)),
+    n_detected = sum(Abundance > 0, na.rm = TRUE),
+    mean = mean(Abundance, na.rm = TRUE),
+    sd = sd(Abundance, na.rm = TRUE),
+    CV = sd / mean,
+    Stability = ifelse(is.finite(CV), 1 / (1 + CV), NA_real_),
+    .groups = "drop"
+  )
+
+stability_otu_res <- stability_otu %>%
+  pivot_wider(
+    id_cols = c(Group, Microcosm, OTU),
+    names_from = Data_type,
+    values_from = c(
+      n_nonNA, n_detected,
+      mean, sd, CV, Stability
+    ),
+    names_glue = "{.value}_{Data_type}"
+  ) %>%
+  left_join(
+    metadata_dna %>%
+      select(Group, Season, Site_type) %>%
+      distinct(),
+    by = "Group"
+  )
+
+
+# filter, only OTUs that have 7 time points are used
+stability_otu_res <- stability_otu_res %>%
+  filter(n_nonNA_rRNA == n_detected_rRNA)%>%
+  filter(n_nonNA_rDNA == n_detected_rDNA)
+
+
+## plot and filter
+p6.2 <- ggplot(stability_otu_res,
+               aes(Stability_rDNA, Stability_rRNA)) +
+  geom_hex(bins = 40) +
+  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
+  geom_smooth(aes(color = Site_type, linetype = Season), 
+              method = "lm", se = FALSE, alpha = 0.9, linewidth = 1.5) +
+  stat_regline_equation(label.y.npc = 0.99, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.88, p.accuracy = 0.001,
+           aes(label = paste(after_stat(r.label), 
+                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
+                             sep = "~`,`~"))) +
+  labs(x = "Temporal stability (rDNA)",
+       y = "Temporal stability (rRNA)",
+       title = "Population level")+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
+                     values = c("#b35806","#762a83","#01665e"))+
+  theme_bw() +
+  theme(panel.background=element_rect(fill='white', color='black'),
+        plot.title = element_text(size=17),
+        axis.title.x =element_text(size=17, color='black', hjust = 0.5),
+        axis.title.y=element_text(size=17, color='black'),
+        axis.text.x =element_text(size=13, color='black'), 
+        axis.text.y=element_text(size=13, color='black')) +
+  theme(strip.text = element_text(size = 15, color = "black"))+
+  theme(legend.text=element_text(size=15, color='black'),
+        legend.title=element_text(size=15, color='black'),
+        legend.key = element_blank(),
+        legend.position = "none")+
+  guides(color = guide_legend(override.aes = list(size = 4)),
+         shape = guide_legend(override.aes = list(size = 4)),
+         size = guide_legend(title = "Time interval (Day)"))
+
+p6.2
+
+### linear mixed-effects model ####
+options(contrasts = c("contr.sum", "contr.poly"))
+
+model <- lmer(Stability_rRNA ~ Stability_rDNA * Season * Site_type
+              + (1 | OTU) + (1 | Microcosm) + (0 + Stability_rDNA | Microcosm),
+            data = stability_otu_res, REML = TRUE)
+
+anova(model)
+
+performance::r2(model)
+
+summary(model)
+
+emtrends(model, ~ Season * Site_type, var = "Stability_rDNA")
+
+
+
+
+
+
+
+## Trajectory asynchrony ####
+
+
+target_days <- c(0, 3, 6, 9, 15, 21, 27)
+
+otu_summary <- otu_long %>%
+  filter(Day %in% target_days) %>%
+  group_by(Group, Trajectory, OTU) %>%
+  summarise(
+    n_nonNA_rRNA = sum(is.finite(rRNA)),
+    n_nonNA_rDNA = sum(is.finite(rDNA)),
+    n_detected_rRNA = sum(is.finite(rRNA) & rRNA > 0),
+    n_detected_rDNA = sum(is.finite(rDNA) & rDNA > 0),
+    n_days = n_distinct(Day),
+    .groups = "drop"
+  )
+
+otu_filter <- otu_summary %>%
+  filter(
+    n_days == length(target_days),
+    n_nonNA_rRNA == n_detected_rRNA,
+    n_nonNA_rDNA == n_detected_rDNA
+  ) %>%
+  select(Group, Trajectory, OTU)
+
+otu_complete <- otu_long %>%
+  semi_join(otu_filter, by = c("Group", "Trajectory", "OTU")) %>%
+  filter(Day %in% target_days) %>%
+  arrange(Group, Trajectory, OTU, Day)
+
+
+# Optional: report how many OTUs remain
+otu_filter_summary <- otu_complete %>%
+  distinct(Group, Trajectory, OTU) %>%
+  count(Group, Trajectory, name = "n_OTUs")
+
+print(otu_filter_summary)
+
+
+# Log-transform
+otu_complete <- otu_complete %>%
+  mutate(
+    log_rDNA = log10(rDNA),
+    log_rRNA = log10(rRNA)
+  )
+
+
+
+
+
+### calc_asynchrony ####
+calc_asynchrony <- function(dat, window_size = 1) {
+  
+  dat <- dat %>% arrange(Day)
+  
+  # Initial abundance and activity
+  initial_rDNA <- dat$rDNA[dat$Day == 0][1]
+  initial_rRNA <- dat$rRNA[dat$Day == 0][1]
+  initial_16S_ratio <- initial_rRNA / initial_rDNA
+  
+  # Remove paired missing observations
+  dat <- dat %>%
+    filter(
+      is.finite(rDNA), is.finite(rRNA),
+      rDNA > 0, rRNA > 0
+    )
+  
+  day <- dat$Day
+  x <- log10(dat$rDNA)
+  y <- log10(dat$rRNA)
+  
+  n_days <- length(day)
+  
+  empty_result <- tibble(
+    n_days = n_days,
+    n_intervals = NA_integer_,
+    initial_rDNA = initial_rDNA,
+    initial_rRNA = initial_rRNA,
+    initial_16S_ratio = initial_16S_ratio,
+    directional_asynchrony = NA_real_,
+    magnitude_asynchrony = NA_real_,
+    temporal_asynchrony_days = NA_real_,
+    mean_signed_offset_days = NA_real_,
+    DTW_distance = NA_real_,
+    DTW_path_length = NA_integer_
+  )
+  
+  # Validate trajectory
+  valid <- (
+    n_days >= 3 &&
+      all(day %in% target_days) &&
+      !anyDuplicated(day) &&
+      sd(x) > 0 &&
+      sd(y) > 0
+  )
+  
+  if (!valid) return(empty_result)
+  
+  dt <- diff(day)
+  
+  # Standardize trajectories separately
+  x_z <- as.numeric(scale(x))
+  y_z <- as.numeric(scale(y))
+  
+  # Changes per day
+  vx <- diff(x_z) / dt
+  vy <- diff(y_z) / dt
+  
+  # A. Directional asynchrony
+  valid_direction <- (vx != 0 & vy != 0)
+  
+  directional_asynchrony <- if (any(valid_direction)) {
+    mean(vx[valid_direction] * vy[valid_direction] < 0)
+  } else {
+    NA_real_
+  }
+  
+  n_intervals <- sum(valid_direction)
+  
+  # B. Magnitude asynchrony
+  magnitude_asynchrony <- mean(abs(abs(vx) - abs(vy)))
+  
+  # C. Temporal asynchrony and DTW distance
+  fit <- tryCatch(
+    dtw(
+      x_z, y_z,
+      window.type = "sakoechiba",
+      window.size = window_size,
+      distance.only = FALSE
+    ),
+    error = function(e) NULL
+  )
+  
+  temporal_asynchrony_days <- NA_real_
+  mean_signed_offset_days <- NA_real_
+  dtw_distance <- NA_real_
+  dtw_path_length <- NA_integer_
+  
+  if (
+    !is.null(fit) &&
+    is.finite(fit$distance) &&
+    length(fit$index1) > 0 &&
+    length(fit$index1) == length(fit$index2)
+  ) {
+    
+    dtw_path_length <- length(fit$index1)
+    dtw_distance <- fit$distance / dtw_path_length
+    
+    day_dna <- day[fit$index1]
+    day_rna <- day[fit$index2]
+    
+    time_offset <- day_rna - day_dna
+    
+    temporal_asynchrony_days <- mean(abs(time_offset))
+    mean_signed_offset_days <- mean(time_offset)
+  }
+  
+  tibble(
+    n_days = n_days,
+    n_intervals = n_intervals,
+    initial_rDNA = initial_rDNA,
+    initial_rRNA = initial_rRNA,
+    initial_16S_ratio = initial_16S_ratio,
+    directional_asynchrony = directional_asynchrony,
+    magnitude_asynchrony = magnitude_asynchrony,
+    temporal_asynchrony_days = temporal_asynchrony_days,
+    mean_signed_offset_days = mean_signed_offset_days,
+    DTW_distance = dtw_distance,
+    DTW_path_length = dtw_path_length
+  )
+}
+
+# calculation
+otu_asynchrony <- otu_complete  %>%
+  group_by(Group, Trajectory, OTU) %>%
+  group_modify(
+    ~ calc_asynchrony(.x, window_size = 0)
+  ) %>%
+  ungroup() %>%
+  arrange(Group, OTU, Trajectory)
+
+otu_asynchrony <- otu_asynchrony %>%
+  left_join(pred.GCN %>%
+              dplyr::select(OTU, GCN),
+            by = "OTU") %>%
+  mutate(DTW_scaled = (DTW_distance - min(DTW_distance, na.rm = TRUE)) /
+           (max(DTW_distance, na.rm = TRUE) - min(DTW_distance, na.rm = TRUE))) %>%
+  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
+  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
+                               Soil_id == "S2" ~ "Grassland",
+                               Soil_id == "S3" ~ "Forest")) %>%
+  mutate(Season = case_when(
+    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
+    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
+  mutate(Soil = case_when(
+    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
+    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
+    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
+
+saveRDS(otu_asynchrony, "phyloseq/otu_interval_7_asynchrony.rds")
+
+
+ggplot(otu_asynchrony, aes(x = log(initial_rDNA), y = DTW_scaled)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
+  geom_hex(bins = 40) +
+  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
+              alpha = 0.9, linewidth = 1.5) +
+  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
+  stat_regline_equation(label.y.npc = 0.15, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
+           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))
+
+
+ggplot(otu_asynchrony, aes(x = log(initial_16S_ratio), y = DTW_scaled)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
+  geom_hex(bins = 40) +
+  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
+              alpha = 0.9, linewidth = 1.5) +
+  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
+  stat_regline_equation(label.y.npc = 0.15, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
+           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))
+
+
+
+### plot Temporal trajectory asynchrony (DTW distance)  ####
+
+library(scales)
+library(ggridges)
+
+otu_asynchrony$Soil <- factor(
+  otu_asynchrony$Soil, 
+  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
+             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
+
+p7.2 <- ggplot(otu_asynchrony,
+  aes(x = DTW_scaled, y = Soil, fill = Soil)) +
+  geom_vline(
+    #xintercept = mean(otu_asynchrony$DTW_scaled, na.rm = TRUE),
+    xintercept = 0.5,
+    linetype = "dashed",colour = "black", linewidth = 0.6) +
+  geom_density_ridges(
+    scale = 1.5,
+    rel_min_height = 0.02,
+    alpha = 0.5,
+    color = "white",
+    linewidth = 0.3,
+    bandwidth = 0.06) +
+  labs(x = "Trajectory asynchrony", y = NULL)  +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_x_continuous(limits = c(0,1)) +
+  theme_bw() +
+  theme(panel.background=element_rect(fill='white', color='black'),
+        plot.title = element_text(size=15),
+        axis.title.x =element_text(size=13, color='black'),
+        axis.title.y=element_text(size=13, color='black'),
+        axis.text.x =element_text(size = 13, color = "black"), 
+        axis.text.y=element_text(size=11, color='black')) +
+  theme(strip.text = element_text(size = 15, color = "black"))+
+  theme(legend.text=element_text(size=15, color='black'),
+        legend.title=element_text(size=15, color='black'),
+        legend.key = element_blank(),
+        legend.position = "none")
+
+p7.2
+
+
+
+#### statistic ####
+library(sandwich)
+library(lmtest)
+
+# linear model
+model <- lm(
+  DTW_scaled ~ Season * Site_type,
+  data = otu_asynchrony
+)
+
+# Model results
+summary(model)
+
+car::Anova(model, type = 2, white.adjust = "hc3")
+
+
+# Pairwise comparisons
+emmeans(model, pairwise ~ Season * Site_type, adjust = "tukey")
+
+
+
+
+### visualization ####
+
+selected_otus <- c("043d0dd93e8348f867854edfb1f54b43")
+
+
+plot_data <- otu_complete %>%
+  filter(
+    OTU %in% selected_otus,
+    Day %in% target_days
+  ) %>%
+  pivot_longer(
+    cols = c(rDNA, rRNA),
+    names_to = "Metric",
+    values_to = "Abundance"
+  ) %>%
+  mutate(log_abundance = log10(Abundance)) %>%
+  group_by(Group, Soil, Trajectory, OTU, Metric) %>%
+  mutate(
+    z_abundance = if (
+      all(is.finite(log_abundance)) &&
+      sd(log_abundance) > 0
+    ) {
+      as.numeric(scale(log_abundance))
+    } else {
+      NA_real_
+    }
+  ) %>%
+  ungroup()
+
+#Group means and SE across Microcosms
+summary_data <- plot_data %>%
+  group_by(Group, Soil, OTU, Day, Metric) %>%
+  summarise(
+    n = sum(is.finite(z_abundance)),
+    mean_z = if (n > 0) mean(z_abundance, na.rm = TRUE) else NA_real_,
+    se_z = if (n > 1) sd(z_abundance, na.rm = TRUE) / sqrt(n) else NA_real_,
+    .groups = "drop"
+  )
+
+
+# plot
+summary_data$Soil <- factor(
+  summary_data$Soil, 
+  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
+             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
+
+p7.1 <- ggplot(summary_data,
+               aes(x = Day, y = mean_z, color = Metric, fill = Metric)) +
+  geom_line(alpha = 0.55, linewidth = 0.6) +
+  geom_ribbon(
+    aes(ymin = mean_z - se_z, ymax = mean_z + se_z),
+    alpha = 0.05, color = NA, na.rm = TRUE) +
+  geom_line(linewidth = 1, na.rm = TRUE) +
+  geom_point(size = 2, na.rm = TRUE) +
+  facet_wrap(~ Soil, ncol = 3) +
+  scale_x_continuous(
+    breaks = target_days,
+    expand = expansion(mult = 0.05)) +
+  scale_color_manual(values = c(rDNA = "#0072B2", rRNA = "#D55E00")) +
+  scale_fill_manual(values = c(rDNA = "#0072B2", rRNA = "#D55E00")) +
+  labs(x = "Day after disturbance", y = "Standardized relative abundance",
+    color = NULL, fill = NULL, title = "Selected OTU (Desertimonas)") +
+  theme_bw(base_size = 15) +
+  theme(panel.background=element_rect(fill='white', color='black'),
+        plot.title = element_text(size=15),
+        axis.title.x =element_text(size=15, color='black', hjust = 0.5),
+        axis.title.y=element_text(size=15, color='black'),
+        axis.text.x =element_text(size=13, color='black'), 
+        axis.text.y=element_text(size=13, color='black')) +
+  theme(strip.text = element_text(size = 13, color = "black"))+
+  theme(legend.text=element_text(size=11, color='black'),
+        legend.title=element_text(size=11, color='black'),
+        legend.position = c(0.3, 0.75),
+        legend.justification = c("right", "top"),
+        legend.spacing.y = unit(0.01, "cm"),
+        legend.key.height = unit(0.2, "cm"),
+        legend.background = element_rect(
+          fill = NA, color = NA),
+        legend.key = element_rect(fill = NA, color = NA))
+
+p7.1
+
+
+## Fig.3 cowplot ####
+
+f3 <- plot_grid(
+  p5.2,p5.1,p6.2,p6.1,
+  ncol=2,
+  align="hv",
+  axis="lb",
+  rel_widths=c(1, 1, 1, 1),
+  labels = "auto",
+  label_size = 22
+)
+
+f3
+
+
+f3 <- plot_grid(
+  f3, legend_h,
+  ncol=1,
+  align="hv",
+  axis="lb",
+  rel_widths=c(1, 0.9),
+  rel_heights=c(1, 0.08)
+)
+
+f3
+
+ggsave("Figure_3_01.jpeg", dpi=600, width = 26, height = 20, units = "cm")
+
+
+f3.b <- plot_grid(
+  p7.1, p7.2,
+  ncol=2,
+  align="hv",
+  axis="b",
+  rel_widths=c(0.75, 0.4),
+  labels = c("e", "f"),
+  label_size = 22
+)
+
+f3.b
+
+
+ggsave("Figure_3_02.jpeg", dpi=600, width = 26, height = 10, units = "cm")
+
+
+
+
+
+
+
+
+
+
+#********************************************####
+# Population transitions ####
 
 dna_gcn_abs <- readRDS("phyloseq/otu_dna_GCN_corrected_absolute.rds")
-my_dna_table <- dna_gcn_abs
 
 ratio_mat <- readRDS(file = "phyloseq/cdna_dna_ratio_mat.rds")
 ratio_mat_clean <- ratio_mat
 ratio_mat_clean[is.nan(ratio_mat_clean)] <- NA
 ratio_mat_clean[is.infinite(ratio_mat_clean)] <- NA
-my_ratio_table <- ratio_mat_clean
 
-keep_otu <- rowSums(my_dna_table > 0, na.rm = TRUE) >= 2
 
-my_dna_table <- my_dna_table[keep_otu, , drop = FALSE]
+table_a <- dna_gcn_abs
 
-my_ratio_table <- my_ratio_table[keep_otu, , drop = FALSE]
+table_b <- ratio_mat_clean
+
+keep_otu <- rowSums(table_a > 0, na.rm = TRUE) >= 2
+
+table_a <- table_a[keep_otu, , drop = FALSE]
+
+table_b <- table_b[keep_otu, , drop = FALSE]
 
 
 ## Calculation ####
 ### all dates
 ## check sample order always !!!
 data.frame(
-  DNA  = colnames(my_dna_table),
-  my_ratio_table = colnames(my_ratio_table)
+  table_a  = colnames(table_a),
+  table_b = colnames(table_b)
 ) |> head(20)
 
-all(rownames(my_dna_table) == rownames(my_ratio_table))
-all(colnames(my_dna_table) == colnames(my_ratio_table))
+all(rownames(table_a) == rownames(table_b))
+all(colnames(table_a) == colnames(table_b))
+
 
 groups <- unique(metadata_dna$Group)
 
-otu_interval_list <- list()
-
-for(g in groups){
-  meta_g <- metadata_dna[metadata_dna$Group == g, , drop = FALSE]
-  meta_g$Day <- as.numeric(as.character(meta_g$Day))
-  day_groups <- split(rownames(meta_g), meta_g$Day)
-  days <- sort(as.numeric(names(day_groups)))
-  
-  dna_mean <- sapply(day_groups, \(x) rowMeans(my_dna_table[, x, drop = FALSE], na.rm = TRUE))
-  ratio_mean <- sapply(day_groups, \(x) rowMeans(my_ratio_table[, x, drop = FALSE], na.rm = TRUE))
-  dna_mean[is.nan(dna_mean)] <- NA
-  ratio_mean[is.nan(ratio_mean)] <- NA
-  colnames(dna_mean) <- colnames(ratio_mean) <- as.character(days)
-  
-  ## Pseudocounts calculated within each Group
-  #pseudo_DNA <- min(dna_mean[dna_mean > 0], na.rm = TRUE) / 4
-  #pseudo_Ratio <- min(ratio_mean[ratio_mean > 0], na.rm = TRUE) / 4
-  
-  pseudo_DNA <- 0
-  pseudo_Ratio <- 0
-  
-  ## Calculate all adjacent intervals
-  for(i in seq_len(length(days) - 1)){
-    d1 <- as.character(days[i]); d2 <- as.character(days[i + 1])
-    DNA_start <- dna_mean[, d1]; 
-    DNA_end <- dna_mean[, d2]
-    Ratio_start <- ratio_mean[, d1]; 
-    Ratio_end <- ratio_mean[, d2]
-    
-    otu_interval_list[[paste(g, d1, d2, sep = "_")]] <- data.frame(
-      Group = g, OTU = rownames(dna_mean), Day_start = days[i], Day_end = days[i + 1],
-      interval = paste0(days[i], "-", days[i + 1]), Duration = days[i + 1] - days[i],
-      DNA_start = DNA_start, DNA_end = DNA_end,
-      DNA_change = DNA_end - DNA_start,
-      DNA_relative_change = (DNA_end - DNA_start) / (DNA_start + pseudo_DNA),
-      DNA_log2FC = log2((DNA_end + pseudo_DNA) / (DNA_start + pseudo_DNA)),
-      Ratio_start = Ratio_start, Ratio_end = Ratio_end,
-      Ratio_change = Ratio_end - Ratio_start,
-      Ratio_relative_change = (Ratio_end - Ratio_start) / (Ratio_start + pseudo_Ratio),
-      Ratio_log2FC = log2((Ratio_end + pseudo_Ratio) / (Ratio_start + pseudo_Ratio)),
-      DNA_detect_n_start = rowSums(my_dna_table[rownames(dna_mean), day_groups[[d1]], drop = FALSE] > 0, na.rm = TRUE),
-      DNA_detect_n_end = rowSums(my_dna_table[rownames(dna_mean), day_groups[[d2]], drop = FALSE] > 0, na.rm = TRUE),
-      Ratio_n_start = rowSums(!is.na(my_ratio_table[rownames(dna_mean), day_groups[[d1]], drop = FALSE])),
-      Ratio_n_end = rowSums(!is.na(my_ratio_table[rownames(dna_mean), day_groups[[d2]], drop = FALSE])),
-      stringsAsFactors = FALSE
-    )
-  }
-}
-
-otu_interval_res <- dplyr::bind_rows(otu_interval_list)
-
-saveRDS(otu_interval_res, file = "phyloseq/OTU_DNA_Ratio_interval_summary_absolute.rds")
-
-
-
-
-## Corr abundance ~ activity ####
-
-otu_interval_res <- readRDS("phyloseq/OTU_DNA_Ratio_interval_summary_absolute.rds")
-
-# remove values of zero
-df_otu_interval <- otu_interval_res %>%
-  dplyr::filter(
-    is.finite(DNA_start), is.finite(DNA_end),
-    is.finite(Ratio_start), is.finite(Ratio_end),
-    DNA_start > 0, DNA_end > 0,
-    Ratio_start > 0, Ratio_end > 0
-  )%>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-
-df_otu_interval$interval <- factor(df_otu_interval$interval, levels = c("0-3", "3-6", "6-9", "9-15", "15-21", "21-27"))
-
-df_otu_interval$Soil <- factor(
-  df_otu_interval$Soil, 
-  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
-             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
-
-p6.1 <- ggplot(df_otu_interval, aes(x = DNA_log2FC, y = Ratio_log2FC)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.99, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.88,
-           aes(label = paste(after_stat(r.label), 
-                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
-                             sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
-  labs(x = "Change in\nOTU absolute abundance",
-       y = "Change in\nOTU 16S ratio",
-       title = "Population level")+
-  #facet_wrap(~interval, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p6.1
-
-### linear model ####
-
-model <- lmer(Ratio_log2FC ~ DNA_log2FC * Season * Site_type + (1 | OTU),
-            data = df_otu_interval)
-
-anova(model)
-
-emtrends(model, ~ Season * Site_type, var = "DNA_log2FC")
-
-
-
-
-
-
-## Lag effect by interval ####
-
-# interval order
-interval_info <- df_otu_interval %>%
-  distinct(interval, Day_start, Day_end) %>%
-  arrange(Day_start)
-
-interval_levels <- interval_info$interval
-
-# all lagged interval pairs
-lagged_pairs <- df_otu_interval %>%
-  select(Group, OTU, Day_start, Day_end, interval, Ratio_log2FC, DNA_log2FC) %>%
-  rename(interval_a = interval, Day_start_a = Day_start, Day_end_a = Day_end,
-         Ratio_a = Ratio_log2FC, DNA_a = DNA_log2FC) %>%
-  inner_join(
-    df_otu_interval %>%
-      select(Group, OTU, Day_start, Day_end, interval, Ratio_log2FC, DNA_log2FC) %>%
-      rename(interval_b = interval, Day_start_b = Day_start, Day_end_b = Day_end,
-             Ratio_b = Ratio_log2FC, DNA_b = DNA_log2FC),
-    by = c("Group", "OTU")
-  ) %>%
-  filter(Day_start_b >= Day_end_a) %>%
-  mutate(
-    interval_a = factor(interval_a, levels = interval_levels),
-    interval_b = factor(interval_b, levels = interval_levels)
-  )
-
-# Four lagged relationships
-lagged_long <- bind_rows(
-  lagged_pairs %>% transmute(Group, OTU, interval_a, interval_b,
-                             Relationship = "Activity → Abundance", X = Ratio_a, Y = DNA_b),
-  lagged_pairs %>% transmute(Group, OTU, interval_a, interval_b,
-                             Relationship = "Abundance → Activity", X = DNA_a, Y = Ratio_b),
-  lagged_pairs %>% transmute(Group, OTU, interval_a, interval_b,
-                             Relationship = "Activity → Activity", X = Ratio_a, Y = Ratio_b),
-  lagged_pairs %>% transmute(Group, OTU, interval_a, interval_b,
-                             Relationship = "Abundance → Abundance", X = DNA_a, Y = DNA_b)
-)
-
-
-# Correlation and P value within each Group
-cor_by_group <- lagged_long %>%
-  group_by(Relationship, interval_a, interval_b, Group) %>%
-  summarise(
-    n = sum(is.finite(X) & is.finite(Y)),
-    cor = if (n >= 10 &&
-              sd(X, na.rm = TRUE) > 0 &&
-              sd(Y, na.rm = TRUE) > 0)
-      cor(X, Y, method = "pearson", use = "complete.obs") else NA_real_,
-    p = if (n >= 10 &&
-            sd(X, na.rm = TRUE) > 0 &&
-            sd(Y, na.rm = TRUE) > 0)
-      cor.test(X, Y, method = "pearson")$p.value else NA_real_,
-    .groups = "drop"
-  )%>%
-  mutate(
-    p_adj = p.adjust(p, method = "BH")
-  )
-
-# General trend across soil groups
-cor_heatmap <- cor_by_group %>%
-  group_by(Relationship, interval_a, interval_b) %>%
-  summarise(
-    cor = median(cor, na.rm = TRUE),
-    n_group = sum(!is.na(cor)),
-    n_sig = sum(p_adj < 0.05, na.rm = TRUE),
-    consistent = n_sig == 6,
-    .groups = "drop"
-  )
-
-cor_heatmap$Relationship <- factor(
-  cor_heatmap$Relationship,
-  levels = c(
-    "Activity → Abundance",
-    "Abundance → Activity",
-    "Activity → Activity",
-    "Abundance → Abundance"
-  )
-)
-
-p6.2 <- ggplot(cor_heatmap, aes(interval_b, interval_a, fill = cor)) +
-  geom_tile(color = "grey85", linewidth = 0.6) +
-  geom_text(
-    data = filter(cor_heatmap, consistent),
-    aes(label = sprintf("%.2f", cor)),
-    fontface = "bold",
-    size = 4
-  ) +
-  facet_wrap(~Relationship, ncol = 2) +
-  scale_fill_gradient2(
-    low = "#2166AC", mid = "white", high = "#B2182B",
-    midpoint = 0, limits = c(-1, 1),
-    name = "Pearson's R"
-  ) +
-  scale_x_discrete(drop = FALSE) +
-  scale_y_discrete(drop = FALSE) +
-  labs(
-    x = "Subsequent interval",
-    y = "Preceding interval"
-  ) +
-  theme_bw() +
-  theme(
-    panel.grid = element_blank(),
-    axis.text.x = element_text(hjust = 1, size = 13, color='black'),
-    axis.text.y = element_text(size = 13, color='black'),
-    axis.title = element_text(size = 17, color='black'),
-    strip.text = element_text(size = 15, color='black'),
-    legend.title = element_text(size = 15, color='black'),
-    legend.text = element_text(size = 12, color='black'),
-    panel.spacing = unit(0.8, "lines")
-  )
-
-p6.2
-
-
-
-
-#*********************####
-## Fig.2 cowplot ####
-
-fig.2 <- plot_grid(
-  p5.1, p6.1,
-  ncol=2, nrow = 1,
-  align="h",
-  rel_widths=c(1,1.3),
-  rel_heights=c(1,1)
-)
-
-fig.2
-
-fig.2 <- plot_grid(
-  fig.2, p6.2,
-  ncol=1, nrow = 2,
-  align="hv",
-  rel_widths=c(1,1),
-  rel_heights=c(1,1)
-)
-
-fig.2
-
-ggsave("Figure_2.jpeg", dpi=600, width = 28, height = 24, units = "cm")
-
-
-
-
-
-
-#*********************####
-# Supplementary ####
-
-## SI: absolute abundance across periods ####
-p6.3 <- ggplot(df_otu_interval, aes(x = DNA_log2FC, y = Ratio_log2FC)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, 
-           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(x = "Change in\nOTU absolute abundance (cell count)",
-       y = "Change in\nOTU 16S ratio (rRNA:rDNA)",
-       title = "OTU absolute abundance vs 16S ratio")+
-  facet_wrap(~interval, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p6.3
-
-
-
-## SI: rRNA vs rDNA ####
-
-dna_gcn_rel = readRDS(file="phyloseq/otu_dna_GCN_corrected_relative.rds")
-cdna_gcn_rel = readRDS(file="phyloseq/otu_cdna_GCN_corrected_relative.rds")
-
-metadata_dna = readRDS(file="phyloseq/metadata_dna.rds")
-
-otu_dna  <- as.matrix(dna_gcn_rel)
-otu_cdna <- as.matrix(cdna_gcn_rel)
-
-
-## filter prevalence
-prev_cdna <- rowSums(otu_cdna > 0, na.rm = TRUE)
-prev_dna  <- rowSums(otu_dna > 0, na.rm = TRUE)
-
-keep_otu <- (prev_cdna >= 2) & (prev_dna >= 2)
-
-otu_cdna <- otu_cdna[keep_otu, , drop = FALSE]
-otu_dna  <- otu_dna[keep_otu, , drop = FALSE]
-
-# align samples and taxa
-stopifnot(all(rownames(otu_cdna) == rownames(otu_dna)))
-stopifnot(all(colnames(otu_cdna) %in% rownames(metadata_dna)))
-
-metadata_dna <- metadata_dna[colnames(otu_dna), , drop = FALSE]
-stopifnot(all(rownames(metadata_dna) == colnames(otu_cdna)))
-
-metadata_dna$Day <- as.numeric(as.character(metadata_dna$Day))
-groups <- unique(metadata_dna$Group)
-otu_interval_list <- list()
-
-for (g in groups) {
-  meta_g <- metadata_dna[metadata_dna$Group == g, , drop = FALSE]
-  day_groups <- split(rownames(meta_g), meta_g$Day)
-  days <- sort(as.numeric(names(day_groups)))
-  
-  cdna_mean <- sapply(day_groups, \(s) rowMeans(otu_cdna[, s, drop = FALSE], na.rm = TRUE))
-  dna_mean  <- sapply(day_groups, \(s) rowMeans(otu_dna[, s, drop = FALSE], na.rm = TRUE))
-  
-  if (is.null(dim(cdna_mean))) cdna_mean <- matrix(cdna_mean, ncol = 1)
-  if (is.null(dim(dna_mean))) dna_mean <- matrix(dna_mean, ncol = 1)
-  colnames(cdna_mean) <- colnames(dna_mean) <- as.character(days)
-  cdna_mean[is.nan(cdna_mean)] <- NA
-  dna_mean[is.nan(dna_mean)] <- NA
-  
-  # Same pseudocount for cDNA and DNA
-  all_positive <- c(cdna_mean[cdna_mean > 0],
-                    dna_mean[dna_mean > 0])
-  
-  #pseudocount <- min(all_positive, na.rm = TRUE) / 4
-  pseudocount <- 0
-  
-  for (i in seq_len(length(days) - 1)) {
-    d1 <- as.character(days[i])
-    d2 <- as.character(days[i + 1])
-    C1 <- cdna_mean[, d1]; C2 <- cdna_mean[, d2]
-    D1 <- dna_mean[, d1]; D2 <- dna_mean[, d2]
-    
-    otu_interval_list[[paste(g, d1, d2, sep = "_")]] <- data.frame(
-      Group = g, OTU = rownames(dna_mean),
-      Day_start = days[i], Day_end = days[i + 1],
-      interval = paste0(days[i], "-", days[i + 1]),
-      Duration = days[i + 1] - days[i],
-      cDNA_start = C1, cDNA_end = C2,
-      DNA_start = D1, DNA_end = D2,
-      delta_rRNA = log2(C2 + pseudocount) - log2(C1 + pseudocount),
-      delta_rDNA = log2(D2 + pseudocount) - log2(D1 + pseudocount),
-      cDNA_log2FC = log2((C2 + pseudocount) / (C1 + pseudocount)),
-      DNA_log2FC = log2((D2 + pseudocount) / (D1 + pseudocount)),
-      # ratio: no pseudocount
-      Ratio_start = C1 / D1,
-      Ratio_end   = C2 / D2,
-      log_ratio_start = log2(C1 / D1),
-      log_ratio_end   = log2(C2 / D2),
-      Ratio_log2FC = log2(C2 / D2) - log2(C1 / D1),
-      stringsAsFactors = FALSE
-    )
-  }
-}
-
-otu_interval_rel <- bind_rows(otu_interval_list)
-
-otu_interval_rel <- otu_interval_rel %>%
-  dplyr::filter(
-    is.finite(DNA_start), is.finite(DNA_end),
-    is.finite(cDNA_start), is.finite(cDNA_end),
-    DNA_start > 0, DNA_end > 0,
-    cDNA_start > 0, cDNA_end > 0
-  )%>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-otu_interval_rel$interval <- factor(otu_interval_rel$interval, levels = c("0-3", "3-6", "6-9", "9-15", "15-21", "21-27"))
-
-
-## change in rDNA and rRNA
-ggplot(otu_interval_rel, aes(x = DNA_log2FC, y = cDNA_log2FC)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, 
-           aes(label = paste(after_stat(r.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(x = "Change in\nrelative abundance (rDNA)",
-       y = "Change in\nrelative abundance (rRNA)",
-       title = "rDNA vs rRNA")+
-  facet_wrap(~interval, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-ggsave("Figure_SI_corr_changes_rRNArDNA_across_periods.jpeg", dpi=600, width = 27, height = 16, units = "cm")
-
-
-
-## change in rDNA and ratio
-p6.4 <- ggplot(otu_interval_rel, aes(x = DNA_log2FC, y = Ratio_log2FC)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, 
-           aes(label = paste(after_stat(r.label), after_stat(p.label),  sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(x = "Change in\nOTU relative abundance (rDNA)",
-       y = "Change in\nOTU 16S ratio (rRNA:rDNA)",
-       title = "OTU relative abundance vs 16S ratio")+
-  facet_wrap(~interval, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p6.4
-
-fig.s2 <- plot_grid(
-  p6.3,p6.4, 
-  ncol=1, nrow = 2,
-  align="hv",
-  rel_widths=c(1,1),
-  rel_heights=c(1,1),
-  labels = "auto",
-  label_size = 18
-)
-
-fig.s2
-
-ggsave("Figure_SI_corr_changes_rDNA16Sratio_across_periods.jpeg", dpi=600, width = 26, height = 30, units = "cm")
-
-
-
-
-
-
-#********************************************####
-# Stability of populations ####
-
-## Calculation ####
-groups <- unique(metadata_dna$Group)
-
-stability_list <- list()
+transition_list <- list()
 
 ## Calculate DNA abundance and ratio dynamics
 for(g in groups){
@@ -593,10 +863,10 @@ for(g in groups){
   
   ## Mean DNA abundance and ratio across biological replicates
   dna_day_mean <- sapply(
-    day_groups, \(x) rowMeans(my_dna_table[, x, drop = FALSE], na.rm = TRUE))
+    day_groups, \(x) rowMeans(table_a[, x, drop = FALSE], na.rm = TRUE))
   
   ratio_day_mean <- sapply(
-    day_groups, \(x) rowMeans(my_ratio_table[, x, drop = FALSE], na.rm = TRUE))
+    day_groups, \(x) rowMeans(table_b[, x, drop = FALSE], na.rm = TRUE))
   
   ## Convert NaN generated by all-NA rows to NA
   dna_day_mean[is.nan(dna_day_mean)] <- NA
@@ -640,8 +910,8 @@ for(g in groups){
   OTU <- rownames(dna_day_mean)
   
   DNA_p <- sapply(seq_len(nrow(dna_day_mean)), function(i){
-    x <- my_dna_table[OTU[i], day0_samples]
-    y <- my_dna_table[OTU[i], day3_samples]
+    x <- table_a[OTU[i], day0_samples]
+    y <- table_a[OTU[i], day3_samples]
     
     x0 <- ifelse(is.finite(x), x, 0); y0 <- ifelse(is.finite(y), y, 0)
     
@@ -657,8 +927,8 @@ for(g in groups){
   })
   
   Ratio_p <- sapply(seq_len(nrow(ratio_day_mean)), function(i){
-    x <- my_ratio_table[OTU[i], day0_samples]
-    y <- my_ratio_table[OTU[i], day3_samples]
+    x <- table_b[OTU[i], day0_samples]
+    y <- table_b[OTU[i], day3_samples]
     
     x0 <- ifelse(is.finite(x), x, 0); y0 <- ifelse(is.finite(y), y, 0)
     if(all(x0 == 0) && sum(y0 > 0) >= 2) return(0.0001)## give a pvalue when Day0 is always zero, indicate activated
@@ -755,7 +1025,7 @@ for(g in groups){
   Ratio_stability_3_27[Ratio_n_timepoints_3_27 < 6] <- NA
   
   ## 7. Save results
-  stability_list[[g]] <- data.frame(
+  transition_list[[g]] <- data.frame(
     OTU = rownames(dna_day_mean),
     Group = g,
     
@@ -796,20 +1066,20 @@ for(g in groups){
 }
 
 ## Merge all groups
-stability_results <- bind_rows(stability_list)
+transition_results <- bind_rows(transition_list)
 
-saveRDS(stability_results, "phyloseq/res_stability_16Sratio_abundance_abs.rds")
+saveRDS(transition_results, "phyloseq/res_stability_16Sratio_abundance_abs.rds")
 
 
 # data filter
-stability_results <- readRDS("phyloseq/res_stability_16Sratio_abundance_abs.rds")
+transition_results <- readRDS("phyloseq/res_stability_16Sratio_abundance_abs.rds")
 
 ## remove zero ratios
-stability_logFC <- stability_results %>%
+transition_logFC <- transition_results %>%
   filter(Ratio_Day0 != 0 & Ratio_Day3 != 0)%>%
   filter(DNA_Day0 != 0 & DNA_Day3 != 0)
 
-stability_logFC <- stability_logFC  %>%
+transition_logFC <- transition_logFC  %>%
   mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
   mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
                                Soil_id == "S2" ~ "Grassland",
@@ -822,16 +1092,15 @@ stability_logFC <- stability_logFC  %>%
     Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
     Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
 
-stability_logFC$Soil <- factor(
-  stability_logFC$Soil, 
+transition_logFC$Soil <- factor(
+  transition_logFC$Soil, 
   levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
              "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
 
 
 
 
-
-#********************************************####
+#*********************####
 # Changes in activity and abundance at Day 3 ####
 
 ## Ratio-state transitions day 0-3 ####
@@ -840,7 +1109,7 @@ stability_logFC$Soil <- factor(
 
 ratio_levels <- c("NA", "Zero", "Low", "Moderate", "High")
 
-stability_results <- stability_results %>%
+transition_results <- transition_results %>%
   mutate(
     Ratio_class_Day0 = case_when(
       is.na(Ratio_Day0) ~ "NA",
@@ -864,7 +1133,7 @@ stability_results <- stability_results %>%
 ### 16S-ratio transited taxa ####
 
 # summary
-significant_ratio_OTU <- stability_results %>%
+significant_ratio_OTU <- transition_results %>%
   filter(!is.na(Ratio_p), Ratio_p < 0.05) %>%
   mutate(
     Ratio_change = case_when(
@@ -1074,7 +1343,7 @@ p1.3
 
 
 #*********************####
-## Fig.3 cowplot ####
+## Fig.4 cowplot ####
 p.a <- plot_grid(
   p1.1,p1.2,
   ncol=2, nrow = 1,
@@ -1094,569 +1363,7 @@ p.a <- plot_grid(
 
 p.a
 
-ggsave("Figure_3_ratio_transitions.jpeg", dpi=600, width = 33, height = 26, units = "cm")
-
-
-
-
-#*********************####
-# Supplementary ####
-
-## SI: Abundance transited taxa ####
-
-# summary
-significant_abun_OTU <- stability_results %>%
-  filter(!is.na(DNA_p), DNA_p < 0.05) %>%
-  mutate(
-    Abun_change = case_when(
-      DNA_change_D3 > 0 ~ "Increased",
-      DNA_change_D3 < 0 ~ "Decreased",
-      TRUE ~ NA_character_),
-    Abun_change = factor(
-      Abun_change,
-      levels = c("Decreased", "Increased"))) %>%
-  filter(!is.na(Abun_change)) %>%
-  left_join(pred.GCN %>%
-              dplyr::select(OTU, GCN),
-            by = "OTU")
-
-
-#### count and taxonomy ####
-tax_split <- readRDS("phyloseq/taxonomy_split_all_OTUs.rds") %>% 
-  as.data.frame(stringsAsFactors = FALSE) %>% tibble::rownames_to_column("OTU")
-
-significant_abun_OTU <- significant_abun_OTU %>%
-  left_join(tax_split, by = "OTU")
-
-tax_level <- "Class"
-
-tax_summary_sig_abun <- significant_abun_OTU %>%
-  filter(!is.na(Abun_change)) %>%
-  count(Group, Abun_change, Taxon = .data[[tax_level]], name = "n") %>%
-  mutate(
-    Taxon = case_when(
-      is.na(Taxon) ~ "Others",
-      grepl("Incertae[_ ]Sedis", Taxon, ignore.case = TRUE) ~ "Others",
-      TRUE ~ Taxon
-    )
-  ) %>%
-  group_by(Group, Abun_change, Taxon) %>%
-  summarise(n = sum(n), .groups = "drop") %>%
-  group_by(Group, Abun_change) %>%
-  mutate(
-    Total_n = sum(n),
-    prop = n / Total_n,
-    percent = prop * 100
-  ) %>%
-  ungroup() %>%
-  arrange(Group, Abun_change, desc(prop))
-
-top_taxa <- tax_summary_sig_abun %>%
-  group_by(Taxon) %>%
-  summarise(total_n = sum(n), .groups = "drop") %>%
-  slice_max(total_n, n = 12) %>%
-  pull(Taxon)
-
-tax_summary_plot <- tax_summary_sig_abun %>%
-  mutate(Taxon = if_else(Taxon %in% top_taxa,Taxon,"Others")) %>%
-  group_by(Group, Abun_change, Taxon) %>%
-  summarise(n = sum(n), .groups = "drop") %>%
-  group_by(Group, Abun_change) %>%
-  mutate(prop = n / sum(n)) %>%
-  ungroup()%>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-tax_summary_plot$Soil <- factor(
-  tax_summary_plot$Soil, 
-  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
-             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
-
-p2.1 <- ggplot(tax_summary_plot, aes(Soil, n, fill = Taxon)) +
-  geom_col(width = 0.65, colour = "white", linewidth = 0.15) +
-  facet_wrap(~Abun_change, nrow = 1) +
-  scale_y_continuous(
-    breaks = scales::pretty_breaks(),
-    expand = expansion(mult = c(0, 0.05))) +
-  scale_fill_brewer(palette = "Paired", name = tax_level) +
-  labs(x = NULL, y = "Number of significant OTUs", fill = tax_level) +
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=12, color='black', angle = 50, hjust = 1), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 17, color = "black"))+
-  theme(legend.text=element_text(size=11, color='black'),
-        legend.title=element_text(size=13, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(colour = guide_legend(nrow = 3, override.aes = list(size = 4, alpha = 1)))
-
-p2.1
-
-sig_abun_proportion <- tax_summary_sig_abun %>%
-  group_by(Group, Abun_change) %>%
-  summarise(n_OTU = sum(n), .groups = "drop") %>%
-  mutate(Soil = recode(Group, SC1="Cold - Agriculture", SC2="Cold - Grassland", SC3="Cold - Forest", 
-                       SW1="Warm - Agriculture", SW2="Warm - Grassland", SW3="Warm - Forest"))
-
-#### summary abundance in total count ####
-abun_sig_abundance <- significant_abun_OTU %>%
-  filter(!is.na(Abun_change)) %>%
-  group_by(Group, Abun_change) %>%
-  summarise(Abundance = sum(DNA_Day0, na.rm = TRUE), .groups = "drop") %>%
-  ungroup()%>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-p2.2 <- ggplot(abun_sig_abundance, aes(x = Season, y = Abundance, group = Site_type)) +
-  geom_line(aes(colour = Site_type), linewidth = 0.8, alpha = 0.7) +
-  geom_point(aes(colour = Site_type), size = 4) +
-  facet_wrap(~Abun_change, nrow = 1) +
-  #scale_y_continuous(labels = scales::percent_format(accuracy = 1),
-  #                   breaks = scales::breaks_width(0.03),
-  #                   expand = expansion(mult = c(0.05, 0.50))) +
-  scale_color_manual(limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  labs(x = NULL, y = "Absolute abundance at Day 0", colour = "Site") +
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 17, color = "black"))+
-  theme(legend.text=element_text(size=13, color='black'),
-        legend.title=element_blank(),
-        legend.key = element_blank(),
-        legend.position = "bottom")+
-  guides(colour = guide_legend(nrow = 1, override.aes = list(size = 4, alpha = 1)))
-
-p2.2
-
-
-#### cowplot ####
-# Abundance transited taxa
-p.b <- plot_grid(
-  p2.1,p2.2,
-  ncol=2, nrow = 1,
-  #align="hv",
-  rel_widths=c(1,0.6),
-  rel_heights=c(1,1),
-  labels = "auto",
-  label_size = 18
-)
-
-p.b
-
-ggsave("Figure_SI_abundance_transited_taxa.jpeg", dpi=600, width = 31, height = 12, units = "cm")
-
-
-
-## SI: Corr initial states to short-term changes ####
-
-#### 16S ratio
-p1.1 <- ggplot(stability_logFC, aes(x = log2(Ratio_Day0), y = Ratio_logFC_D3)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
-           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(y = "Sensitivity of 16S ratio",
-       x = "16S ratio at Day 0")+
-  #facet_wrap(~Soil, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.1
-
-p1.2 <- ggplot(stability_logFC, aes(x = log2(DNA_Day0), y = Ratio_logFC_D3)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  #geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
-           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(y = "Sensitivity of 16S ratio",
-       x = "Absolute abundance at Day 0")+
-  #facet_wrap(~Soil, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.2
-
-p1.3 <- ggplot(stability_logFC, aes(x = log2(Ratio_Day0), y = DNA_logFC_D3)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
-           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(y = "Sensitivity of absolute abundance",
-       x = "16S ratio at Day 0")+
-  #facet_wrap(~Soil, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.3
-
-p1.4 <- ggplot(stability_logFC, aes(x = log2(DNA_Day0), y = DNA_logFC_D3)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30", linewidth = 0.5) +
-  #geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
-  geom_hex(bins = 40) +
-  geom_smooth(aes(color=Site_type, linetype = Season), method = "lm", se = FALSE, 
-              alpha = 0.9, linewidth = 1.5) +
-  #geom_ribbon(stat = "smooth", method = "lm", alpha=0.2, color="grey30", linetype = 2)+
-  stat_regline_equation(label.y.npc = 0.15, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.05, p.accuracy = 0.001,
-           aes(label = paste(after_stat(r.label), after_stat(p.label), sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
-  labs(y = "Sensitivity of absolute abundance",
-       x = "Absolute abundance at Day 0")+
-  #facet_wrap(~Soil, nrow = 2) +
-  scale_fill_gradient(trans = "log10", low = "grey90", high = "grey30", name = "OTU density")+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.4
-### cowplot ####
-
-legend_3 <- get_legend(p1.1 + theme(legend.position = "bottom"))
-
-p <- plot_grid(
-  p1.1,p1.3,
-  p1.2,p1.4,
-  ncol=2, nrow = 2,
-  align="hv",
-  axis="tblr",
-  rel_widths=c(1,1,1,1),
-  rel_heights=c(1,1,1,1)
-)
-
-p
-
-p <- plot_grid(
-  legend_3, p,
-  ncol=1, nrow = 2,
-  align="hv",
-  axis="tblr",
-  rel_widths=c(1,1),
-  rel_heights=c(0.1,1)
-)
-
-p
-
-ggsave("Figure_SI_corr_initial_states_responses.jpeg", dpi=600, width = 26, height = 24, units = "cm")
-
-
-
-
-
-## SI: compare class - ratio ####
-
-significant_ratio_OTU <- significant_ratio_OTU %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-significant_ratio_OTU$Soil <- factor(
-  significant_ratio_OTU$Soil, 
-  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
-             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
-
-p1.1 <- ggplot(significant_ratio_OTU, aes(x = Ratio_change, y = Ratio_Day0)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Ratio_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "16S ratio at Day 0", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Deactivated", "Activated")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.1
-
-p1.2 <- ggplot(significant_ratio_OTU, aes(x = Ratio_change, y = DNA_Day0)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Ratio_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "Absolute abundance at Day 0", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Deactivated", "Activated")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.2
-
-p1.3 <- ggplot(significant_ratio_OTU, aes(x = Ratio_change, y = GCN)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Ratio_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "16S rrn copy number", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Deactivated", "Activated")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.3
-
-#### cowplot ####
-p <- plot_grid(
-  p1.1,p1.2,p1.3,
-  ncol=1, nrow = 3,
-  align="hv",
-  axis="tblr",
-  rel_widths=c(1,1,1),
-  rel_heights=c(1,1,1)
-)
-
-p
-
-ggsave("Figure_SI_compare_ratio_categories.jpeg", dpi=600, width = 34, height = 24, units = "cm")
-
-
-
-## SI: compare class - abundance ####
-
-significant_abun_OTU <- significant_abun_OTU %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-significant_abun_OTU$Soil <- factor(
-  significant_abun_OTU$Soil, 
-  levels = c("Cold - Agriculture","Cold - Grassland", "Cold - Forest",
-             "Warm - Agriculture", "Warm - Grassland", "Warm - Forest"))
-
-p1.1 <- ggplot(significant_abun_OTU, aes(x = Abun_change, y = Ratio_Day0)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Abun_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "16S ratio at Day 0", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Decreased", "Increased")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.1
-
-p1.2 <- ggplot(significant_abun_OTU, aes(x = Abun_change, y = DNA_Day0)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Abun_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "Absolute abundance at Day 0", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Decreased", "Increased")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.2
-
-p1.3 <- ggplot(significant_abun_OTU, aes(x = Abun_change, y = GCN)) +
-  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.15) +
-  geom_jitter(aes(color = Abun_change), width = 0.15, alpha = 0.3) +
-  facet_wrap(~Soil, nrow = 1) +
-  labs(x = NULL, y = "16S rrn copy number", colour = NULL) +
-  scale_y_continuous(expand = expansion(mult = c(0.1, 0.4)))+
-  stat_compare_means(method = "wilcox.test", comparisons = list(c("Decreased", "Increased")),
-                     method.args = list(paired = FALSE, exact = FALSE),
-                     label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.6) +
-  scale_colour_brewer(palette = "Set1")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 13, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-p1.3
-
-#### cowplot ####
-p <- plot_grid(
-  p1.1,p1.2,p1.3,
-  ncol=1, nrow = 3,
-  align="hv",
-  axis="tblr",
-  rel_widths=c(1,1,1),
-  rel_heights=c(1,1,1)
-)
-
-p
-
-ggsave("Figure_SI_compare_abundance_categories.jpeg", dpi=600, width = 34, height = 24, units = "cm")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ggsave("Figure_4_ratio_transitions.jpeg", dpi=600, width = 33, height = 26, units = "cm")
 
 
 
