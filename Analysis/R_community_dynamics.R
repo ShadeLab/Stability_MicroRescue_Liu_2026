@@ -1,5 +1,5 @@
 # R script for STB Project ####
-# Multi-dimensional community responses ####
+# Multi-dimensional and multi-level responses ####
 
 #********************************************####
 
@@ -19,6 +19,8 @@ library(ggplot2)
 library(cowplot)
 library(ggalluvial)
 
+
+
 # Load data ####
 
 df_cell_count <- readRDS("logos/df_cell_count.rds")
@@ -26,9 +28,6 @@ df_cell_count <- readRDS("logos/df_cell_count.rds")
 df_redox <- readRDS("logos/df_redox.rds")
 
 metadata_dna = readRDS(file = "phyloseq/metadata_dna.rds")
-
-
-
 
 
 
@@ -78,33 +77,31 @@ legend_day <- get_legend(p_legend_v + guides(size=guide_legend(order=1),
 
 # horizontal
 p_legend_h <- ggplot(legend_df,aes(x=x,y=y,xend=xend,yend=yend))+
-  geom_segment(aes(linetype=Season),colour="black",linewidth=1)+
-  geom_point(aes(x=1.5,colour=Site_type,fill=Site_type,size=Day,shape=Season),stroke=1)+
+  geom_segment(aes(colour=Site_type, linetype=Season),linewidth=1)+
+  geom_point(aes(x=1.5,colour=Site_type,fill=Site_type,size=Day),stroke=1)+
   scale_colour_manual(name="Site",values=site_color)+
   scale_fill_manual(name="Site",values=site_color)+
   scale_size_manual(name="Day",values=day_size)+
-  scale_shape_manual(name="Season",values=season_shape)+
   scale_linetype_manual(name="Season",values=season_linetype)+
   guides(
     colour=guide_legend(order=1,override.aes=list(shape=21,size=5,fill=site_color,linetype=0)),
     fill="none",
-    shape=guide_legend(order=3,override.aes=list(size=5,fill="black",colour="black")),
-    linetype=guide_legend(order=3,override.aes=list(shape=c(21,24), size=5, fill=NA, colour="black")),
-    size=guide_legend(order=4,override.aes=list(shape=21,colour="black",fill="black",linetype=0))
+    linetype=guide_legend(order=2,override.aes=list(colour="black",linewidth=1)),
+    size="none"
   )+
   theme_void()+
   theme(
     legend.position="bottom",
     legend.box="horizontal",
     legend.text=element_text(size=15),
-    legend.title=element_text(size=17),
+    legend.title=element_text(size=15),
     legend.key=element_blank(),
-    legend.key.width=grid::unit(1.5,"cm")
+    legend.key.width=grid::unit(1,"cm")
   )
 
 p_legend_h
 
-legend_h <- cowplot::get_legend(p_legend_h+guides(size = "none"))
+legend_h <- cowplot::get_legend(p_legend_h)
 
 
 
@@ -422,7 +419,7 @@ resist_median_redox <- calc_resistance(
       Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
       Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
       Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
+  
 
 
 ### plot ####
@@ -668,11 +665,6 @@ meta <- metadata_dna %>%
     Trajectory=interaction(Group,Replicate,sep="_")
   )
 
-### adonis with wunifrac ####
-wunifrac_dist <- as.dist(as.matrix(phyloseq::distance(ps, method="wunifrac", normalized=TRUE, fast=TRUE))[meta$Sample_id, meta$Sample_id])
-
-saveRDS(wunifrac_dist, "phyloseq/wunifrac_dist_dna_gcn_absolute.rds")
-
 wunifrac_dist <- readRDS(file = "phyloseq/wunifrac_dist_dna_gcn_absolute.rds")
 
 wu_mat <- as.matrix(wunifrac_dist)
@@ -704,6 +696,8 @@ adonis_res <- vegan::adonis2(
 )
 
 adonis_res
+
+
 
 
 ## Resistance and Temporal stability ####
@@ -780,275 +774,6 @@ p3.1 <- cowplot::plot_grid(
 )
 
 p3.1
-
-
-
-
-
-#*********************####
-# Supplementary ####
-
-## Dynamics of total cell ####
-
-df_syb <- df_cell_count %>%
-  filter(Type == "Total") %>%
-  mutate(density_syb = density) %>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-### plot dynamic ####
-p1.1 <- ggplot(df_syb) +
-  aes(x = Day, y = density, color = Site_type, fill = Site_type, group = interaction(Site_type, Season)) +
-  #geom_point(aes(shape = Season), size = 2, alpha = 0.1) +
-  stat_summary(aes(color = Site_type, linetype = Season), fun = mean,
-               geom = "line", alpha = 0.7, linewidth = 1.5)+
-  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.15, color=NA) +
-  #facet_wrap(~Group, scales = "free_y")+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  scale_x_continuous(name = "Day after disturbance", breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_y_log10(name = expression("Cell abundance (g "^{-1}*" dry soil)"),
-                breaks = scales::trans_breaks("log10", function(x) 10^x),
-                labels = scales::trans_format("log10", scales::math_format(10^.x)))+
-  labs(x = "Day after disturbance") +
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")
-
-p1.1
-
-
-## Resistance ####
-
-resist_syb_count <- calc_resistance(
-  df = df_syb,
-  value_col = density_syb,
-  group_cols = c("Group", "Type", "Replicate"))%>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-
-
-### plot ####
-p1.2 <- ggplot(resist_syb_count, aes(x = Season, y = resistance_Day3))+
-  geom_boxplot(aes(group = Season), width = 0.4, alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(aes(shape = Season, colour = Site_type), width = 0.15, alpha = 0.7, size = 3) +
-  scale_y_continuous(limits = c(0.3, 1))+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  labs(y = "Resistance (Day 3)")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_blank(),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size = 15, color = "black"), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.2
-
-
-p1.3 <- ggplot(resist_syb_count, aes(x = Season, y = resistance_Day27))+
-  geom_boxplot(aes(group = Season), width = 0.4, alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(aes(shape = Season, colour = Site_type), width = 0.15, alpha = 0.7, size = 3) +
-  scale_y_continuous(limits = c(0.3, 1))+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  labs(y = "Resistance (Day 27)")+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_blank(),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size = 15, color = "black"), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.3
-
-
-### linear model ####
-
-# Day 3
-model <- lm(
-  resistance_Day3 ~ Season * Site_type,
-  data = resist_syb_count
-)
-
-anova(model)
-
-r2(model)
-
-pairs(emmeans(model, ~ Site_type | Season), adjust = "tukey")
-
-# Day 27
-model <- lm(
-  resistance_Day27 ~ Season * Site_type,
-  data = resist_syb_count
-)
-
-anova(model)
-
-r2(model)
-
-pairs(emmeans(model, ~ Site_type | Season), adjust = "tukey")
-
-
-
-## Temporal stability ####
-
-# normalized temporal cv
-stability_syb_count <- df_cell_count %>%
-  filter(Type %in% c("Total")) %>%
-  group_by(Group, Replicate, Type) %>%
-  summarise(
-    mean = mean(density, na.rm = TRUE),
-    sd = sd(density, na.rm = TRUE),
-    CV = sd / mean,
-    stability = ifelse(is.finite(CV), 1 / (1 + CV), NA_real_),
-    mean_3_27 = mean(density[Day >= 3 & Day <= 27], na.rm = TRUE),
-    sd_3_27 = sd(density[Day >= 3 & Day <= 27], na.rm = TRUE),
-    CV_3_27 = sd_3_27 / mean_3_27,
-    stability_3_27 = ifelse(is.finite(CV_3_27), 1 / (1 + CV_3_27), NA_real_),
-    .groups = "drop"
-  )
-
-stability_syb_count <- stability_syb_count %>%
-  mutate(Soil_id = gsub("(S)[CW]", "\\1", Group)) %>%
-  mutate(Site_type = case_when(Soil_id == "S1" ~ "Agriculture",
-                               Soil_id == "S2" ~ "Grassland",
-                               Soil_id == "S3" ~ "Forest")) %>%
-  mutate(Season = case_when(
-    Group == "SC1" ~ "Cold", Group == "SC2" ~ "Cold", Group == "SC3" ~ "Cold",
-    Group == "SW1" ~ "Warm", Group == "SW2" ~ "Warm", Group == "SW3" ~ "Warm"))  %>%
-  mutate(Soil = case_when(
-    Group == "SC1" ~ "Cold - Agriculture", Group == "SC2" ~ "Cold - Grassland",
-    Group == "SC3" ~ "Cold - Forest", Group == "SW1" ~ "Warm - Agriculture",
-    Group == "SW2" ~ "Warm - Grassland", Group == "SW3" ~ "Warm - Forest"))
-
-
-p1.4 <- ggplot(stability_syb_count %>% filter(Type %in% c("Total")), 
-               aes(x = Season, y = stability))+
-  geom_boxplot(aes(group = Season), width = 0.4, alpha = 0.8, outlier.shape = NA) +
-  geom_jitter(aes(shape = Season, colour = Site_type), width = 0.15, alpha = 0.7, size = 3) +
-  scale_y_continuous(limits = c(0.5, 1))+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  labs(y = "Temporal stability")+
-  #stat_compare_means(method = "wilcox.test", comparisons = list(c("Cold", "Warm")),
-  #                   label = "p.signif", label.x.npc = 0.4, size = 6, label.y.npc = 0.999) +
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_blank(),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size = 15, color = "black"), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 5)))
-
-p1.4
-
-#### linear model ####
-
-model <- lm(
-  stability ~ Season * Site_type,
-  data = stability_syb_count
-)
-
-anova(model)
-summary(model)
-r2(model)
-
-emmeans(model, pairwise ~ Site_type | Season, adjust = "tukey")
-
-
-## cowplot ####
-
-p1 <- plot_grid(
-  p1.1,p1.2,p1.3,p1.4,
-  ncol=4,
-  align="hv",
-  axis="lb",
-  rel_widths=c(0.8, 0.3, 0.3, 0.3)
-)
-
-p1
-
-p1 <- plot_grid(
-  p1,legend_2,
-  ncol=1,
-  align="hv",
-  axis="lb",
-  rel_widths=c(1, 1),
-  rel_heights=c(1, 0.2)
-)
-
-p1
-
-ggsave("Figure_1_SI_01.jpeg", dpi=600, width = 32, height = 12, units = "cm")
-
-
-
-
 
 
 
@@ -1150,7 +875,7 @@ change_combined <- change_syb_count %>%
   mutate(Trajectory=interaction(Group,Replicate,sep="_"))
 
 
-
+saveRDS(change_combined, "phyloseq/community_change_combined.rds")
 
 
 ### corr activity ~ community size ####
@@ -1162,15 +887,15 @@ p5.1 <- ggplot(change_combined, aes(x = log2FC_rsg, y = log2FC_redox)) +
   geom_point(color = "grey30", size = 3, alpha = 0.3) +
   geom_smooth(aes(color = Site_type, linetype = Season), 
               method = "lm", se = FALSE, alpha = 0.9, linewidth = 1.5) +
-  stat_regline_equation(label.y.npc = 0.99, size = 5)+
-  stat_cor(method = "pearson", size = 5, label.y.npc = 0.88, p.accuracy = 0.001,
+  stat_regline_equation(label.y.npc = 1, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.9, p.accuracy = 0.001,
            aes(label = paste(after_stat(r.label), 
                              gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
                              sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
   #facet_wrap(~interval)+
-  labs(x = "Change in\nactive cell abundance",
-       y = "Change in\nmedian redox activity",
+  labs(x = "Change in\nactive cell abundance (by interval)",
+       y = "Change in\nredox activity (by interval)",
        title = "Community level")+
   scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
                      values = c("#b35806","#762a83","#01665e"))+
@@ -1193,7 +918,7 @@ p5.1 <- ggplot(change_combined, aes(x = log2FC_rsg, y = log2FC_redox)) +
 p5.1
 
 
-model <- lm(log2FC_redox ~ log2FC_rsg * Season * Site_type,
+model <- lmer(log2FC_redox ~ log2FC_rsg * Season * Site_type,
             data = change_combined)
 
 anova(model)
@@ -1206,256 +931,49 @@ emtrends(model, ~ Season * Site_type, var = "log2FC_rsg")
 
 
 
+
+
+# Stability summary ####
+# community stability index
+
+p5.2 <- ggplot(filter(stability_com),
+               aes(x = redox_stability, y = rsg_stability)) +
+  geom_point(color = "grey30", size = 3, alpha = 0.3) +
+  geom_smooth(color = "grey5", method = "lm", se = FALSE, alpha = 0.9, linewidth = 1.5) +
+  stat_regline_equation(label.y.npc = 1, size = 5)+
+  stat_cor(method = "pearson", size = 5, label.y.npc = 0.9, p.accuracy = 0.001,
+           aes(label = paste(after_stat(r.label), 
+                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
+                             sep = "~`,`~")))+
+  #facet_wrap(~Day) +
+  theme_bw()+
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1)))+
+  labs(x = "Temporal stability\n(active cell abundance)",
+       y = "Temporal stability\n(redox activity)",
+       title = "Community level")+
+  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
+                     values = c("#b35806","#762a83","#01665e"))+
+  theme_bw() +
+  theme(panel.background=element_rect(fill='white', color='black'),
+        plot.title = element_text(size=17),
+        axis.title.x =element_text(size=17, color='black', hjust = 0.5),
+        axis.title.y=element_text(size=17, color='black'),
+        axis.text.x =element_text(size=13, color='black'), 
+        axis.text.y=element_text(size=13, color='black')) +
+  theme(strip.text = element_text(size = 15, color = "black"))+
+  theme(legend.text=element_text(size=15, color='black'),
+        legend.title=element_text(size=15, color='black'),
+        legend.key = element_blank(),
+        legend.position = "none")+
+  guides(color = guide_legend(override.aes = list(size = 4)),
+         shape = guide_legend(override.aes = list(size = 4)),
+         size = guide_legend(title = "Time interval (Day)"))
+
+p5.2
+
+
+
 # @ R_population_dynamics.R for population changes
-
-
-
-#*********************####
-# Supplementary ####
-
-
-## Mean of Squared Successive Differences (MSSD) ####
-# rolling MSSD
-library(slider)
-
-roll_n  <- 2
-
-# syb
-mssd_syb <- df_syb %>%
-  arrange(Exp_id, Replicate, Microcosm, Day) %>%
-  group_by(Exp_id, Replicate, Microcosm) %>%
-  mutate(dt = Day - lag(Day),
-         delta2 = ((density_syb - lag(density_syb))/dt)^2,
-         rolling_MSSD = slide_dbl(delta2, ~mean(.x, na.rm = TRUE),
-                                  .before = roll_n  - 1, .complete = TRUE),
-         rolling_MSSD_rel = rolling_MSSD / 
-           slide_dbl(density_syb, ~mean(.x, na.rm = TRUE),
-                     .before = roll_n  - 1, .complete = TRUE)^2
-  ) %>%
-  ungroup()
-
-mssd_plot_syb <- mssd_syb %>%
-  filter(is.finite(rolling_MSSD_rel)) %>%
-  group_by(Day, Group, Soil_id, Site_type, Season) %>%
-  summarise(
-    mean_MSSD = mean(rolling_MSSD_rel, na.rm = TRUE),
-    se_MSSD = sd(rolling_MSSD_rel, na.rm = TRUE) /
-      sqrt(sum(is.finite(rolling_MSSD_rel))),
-    .groups = "drop"
-  )
-
-# rsg
-mssd_rsg <- df_rsg %>%
-  arrange(Exp_id, Replicate, Microcosm, Day) %>%
-  group_by(Exp_id, Replicate, Microcosm) %>%
-  mutate(dt = Day - lag(Day),
-         delta2 = ((density_rsg - lag(density_rsg))/dt)^2,
-         rolling_MSSD = slide_dbl(delta2, ~mean(.x, na.rm = TRUE),
-                                  .before = roll_n  - 1, .complete = TRUE),
-         rolling_MSSD_rel = rolling_MSSD / 
-           slide_dbl(density_rsg, ~mean(.x, na.rm = TRUE),
-                     .before = roll_n  - 1, .complete = TRUE)^2
-  ) %>%
-  ungroup()
-
-mssd_plot_rsg <- mssd_rsg %>%
-  filter(is.finite(rolling_MSSD_rel)) %>%
-  group_by(Day, Group, Soil_id, Site_type, Season) %>%
-  summarise(
-    mean_MSSD = mean(rolling_MSSD_rel, na.rm = TRUE),
-    se_MSSD = sd(rolling_MSSD_rel, na.rm = TRUE) /
-      sqrt(sum(is.finite(rolling_MSSD_rel))),
-    .groups = "drop"
-  )
-
-# redox
-mssd_redox <- df_redox %>%
-  arrange(Exp_id, Replicate, Microcosm, Day) %>%
-  group_by(Exp_id, Replicate, Microcosm) %>%
-  mutate(dt = Day - lag(Day),
-         delta2 = ((median_fluorescence - lag(median_fluorescence))/dt)^2,
-         rolling_MSSD = slide_dbl(delta2, ~mean(.x, na.rm = TRUE),
-                                  .before = roll_n  - 1, .complete = TRUE),
-         rolling_MSSD_rel = rolling_MSSD / 
-           slide_dbl(median_fluorescence, ~mean(.x, na.rm = TRUE),
-                     .before = roll_n  - 1, .complete = TRUE)^2
-  ) %>%
-  ungroup()
-
-mssd_plot_redox <- mssd_redox %>%
-  filter(is.finite(rolling_MSSD_rel)) %>%
-  group_by(Day, Group, Soil_id, Site_type, Season) %>%
-  summarise(
-    mean_MSSD = mean(rolling_MSSD_rel, na.rm = TRUE),
-    se_MSSD = sd(rolling_MSSD_rel, na.rm = TRUE) /
-      sqrt(sum(is.finite(rolling_MSSD_rel))),
-    .groups = "drop"
-  )
-
-# composition
-mssd_wu <- df_wu %>%
-  arrange(Trajectory, Day) %>%
-  group_by(Trajectory) %>%
-  mutate(
-    rolling_succession = slide_dbl(
-      succession_rate,
-      ~mean(.x, na.rm = TRUE),
-      .before = roll_n - 1,
-      .complete = TRUE
-    )
-  ) %>%
-  ungroup()
-
-mssd_plot_wu <- mssd_wu %>%
-  filter(is.finite(rolling_succession)) %>%
-  group_by(Day, Group, Soil_id, Site_type, Season) %>%
-  summarise(
-    mean_succession = mean(rolling_succession, na.rm = TRUE),
-    se_succession = sd(rolling_succession, na.rm = TRUE) /
-      sqrt(sum(is.finite(rolling_succession))),
-    .groups = "drop"
-  )
-
-### plot ####
-p1.1 <- ggplot(mssd_plot_syb,aes(Day, mean_MSSD,
-                                 linetype = Season, color = Site_type, group = Group)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 3, alpha = 0.7) +
-  geom_errorbar( aes(ymin = mean_MSSD - se_MSSD, ymax = mean_MSSD + se_MSSD), width = 0.4) +
-  #facet_grid(Site_type ~ Season) +
-  labs(title = "Total cell abundance", 
-       x = "Day after disturbance", 
-       y = "Relative rolling MSSD", 
-       linetype = "Season") +
-  scale_x_continuous(name = "Day after disturbance", breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_y_continuous(limits = c(0, 0.06), expand = expansion(mult = c(0.05, 0.1)))+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")
-
-p1.1
-
-p1.2 <- ggplot(mssd_plot_rsg,aes(Day, mean_MSSD,
-                                 linetype = Season, color = Site_type, group = Group)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 3, alpha = 0.7) +
-  geom_errorbar(aes(ymin = mean_MSSD - se_MSSD, ymax = mean_MSSD + se_MSSD), width = 0.4) +
-  #facet_grid(Site_type ~ Season) +
-  labs(title = "Active cell abundance", 
-       x = "Day after disturbance", 
-       y = "Relative rolling MSSD", 
-       linetype = "Season") +
-  scale_x_continuous(name = "Day after disturbance", breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_y_continuous(limits = c(0, 0.06), expand = expansion(mult = c(0.05, 0.1)))+
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")
-
-p1.2
-
-p1.3 <- ggplot(mssd_plot_redox,aes(Day, mean_MSSD,
-                                   linetype = Season, color = Site_type, group = Group)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 3, alpha = 0.7) +
-  geom_errorbar( aes(ymin = mean_MSSD - se_MSSD, ymax = mean_MSSD + se_MSSD), width = 0.4) +
-  #facet_grid(Site_type ~ Season) +
-  labs(title = "Community redox activity", 
-       x = "Day after disturbance", 
-       y = "Relative rolling MSSD", 
-       linetype = "Season") +
-  scale_y_continuous(limits = c(0, 0.06), expand = expansion(mult = c(0.05, 0.1)))+
-  scale_x_continuous(breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")
-
-p1.3
-
-p1.4 <- ggplot(mssd_plot_wu, aes(Day, mean_succession,
-                                 linetype = Season, color = Site_type, group = Group)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 3, alpha = 0.7) +
-  geom_errorbar(aes(ymin = mean_succession - se_succession, ymax = mean_succession + se_succession), width = 0.4) +
-  #facet_grid(Site_type ~ Season) +
-  labs(title = "Community composition", 
-       x = "Day after disturbance", 
-       y = "Relative rolling MSSD", 
-       linetype = "Season") +
-  scale_y_continuous(limits = c(0, 0.06), expand = expansion(mult = c(0.05, 0.1)))+
-  scale_x_continuous(breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")
-
-p1.4
-
-
-ggarrange(p1.1, p1.2, p1.3, p1.4, ncol = 2, nrow = 2, common.legend = TRUE)
-
-ggsave("Figure_SI_MSSD_rolling.jpeg", dpi=600, width = 26, height = 20, units = "cm")
-
-
-
 
 
 
