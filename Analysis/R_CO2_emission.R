@@ -152,6 +152,7 @@ draws_respiration <- fit_respiration %>%
 
 
 
+
 ## Emission rate ####
 df_respiration <- draws_respiration %>%
   left_join(metadata_soil %>%
@@ -173,6 +174,7 @@ df_respiration <- draws_respiration %>%
     Group == "SW3" ~ "Warm - Forest")) 
 
 saveRDS(df_respiration, "respiration/df_respiration.rds")
+
 
 
 
@@ -200,6 +202,13 @@ summary_respiration <- df_respiration %>%
   filter(!(Group %in% c("SW2","SW3") & Day %in% c(9,27)))
 
 saveRDS(summary_respiration, "respiration/summary_respiration.rds")
+
+
+
+
+
+
+
 
 
 #*********************####
@@ -263,14 +272,12 @@ p4.1 <- ggplot(summary_respiration_redox, aes(x = median_fluorescence, y = initi
                      xmax = median_fluorescence + median_fluorescence_se, color = Site_type), height = 0) +
   geom_smooth(method = "lm", se = FALSE, color = "grey10", alpha = 0.2, linetype = 2) +
   geom_ribbon(stat = "smooth", method = "lm", alpha=0.05, color="grey30", linetype = 2)+
-  #stat_regline_equation(label.y = 87, size = 5)+
   stat_cor(method = "spearman", size = 5, label.y = 85, p.accuracy = 0.01,
            aes(label = paste(gsub("italic(R)", "italic(rho)", after_stat(r.label), fixed = TRUE), 
                              gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
                              sep = "~`,`~")))+
   scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
   scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))+
-  #facet_wrap(~Season)+
   labs(y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")"),
        x = "Fluorescence intensity (a.u.)",
        title = "Median redox activity")+
@@ -305,14 +312,12 @@ p4.2 <- ggplot(summary_respiration_redox, aes(x = rsg_density, y = initial_rate/
                      xmax = rsg_density + rsg_density_se, color = Site_type), height = 0) +
   geom_smooth(method = "lm", se = FALSE, color = "grey10", alpha = 0.2, linetype = 1) +
   geom_ribbon(stat = "smooth", method = "lm", alpha=0.05, color="grey30", linetype = 2)+
-  #stat_regline_equation(label.y = 87, size = 5)+
   stat_cor(method = "spearman", size = 5, label.y = 85, p.accuracy = 0.001,
            aes(label = paste(gsub("italic(R)", "italic(rho)", after_stat(r.label), fixed = TRUE), 
                              gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
                              sep = "~`,`~")))+
   scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
-  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))+
-  #facet_wrap(~Site_type)+
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)), n.breaks = 4)+
   labs(y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")"),
        x = expression("Cell abundance (g"^{-1}*" soil)"),
        title = "Active cell abundance")+
@@ -347,14 +352,12 @@ p4.3 <- ggplot(summary_respiration_redox, aes(x = cumulative_fluo, y = initial_r
                      xmax = cumulative_fluo + cumulative_fluo_se, color = Site_type), height = 0) +
   geom_smooth(method = "lm", se = FALSE, color = "grey10", alpha = 0.2, linetype = 1) +
   geom_ribbon(stat = "smooth", method = "lm", alpha=0.05, color="grey30", linetype = 2)+
-  #stat_regline_equation(label.y = 87, size = 5)+
   stat_cor(method = "spearman", size = 5, label.y = 85, p.accuracy = 0.001,
            aes(label = paste(gsub("italic(R)", "italic(rho)", after_stat(r.label), fixed = TRUE), 
                              gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
                              sep = "~`,`~")))+
   scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
-  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))+
-  #facet_wrap(~Site_type)+
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)), n.breaks = 4)+
   labs(y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")"),
        x = expression("Fluorescence intensity (g"^{-1}*" soil)"),
        title = "Cumulative activity")+
@@ -396,171 +399,4 @@ f1.d
 
 
 
-
-#*********************####
-# Supplementary ####
-
-### plot respiration emission ####
-p4.6 <- ggplot(df_respiration, aes(x = Day, y = initial_rate/15, colour = Site_type, fill = Site_type, group = Group)) +
-  stat_pointinterval(.width = c(0.66, 0.95), point_interval = "median_hdci",
-                     point_size = 3.5 , point_alpha = 0.6,
-                     interval_alpha = 0.6,
-                     position = position_dodge(width = 1)) +
-  geom_line(aes(linetype = Season), stat = "summary", fun = median, linewidth = 1.5, alpha = 0.6,
-            position = position_dodge(width = 1)) +
-  #facet_wrap(~group, scales = "free_y")+
-  scale_x_continuous(name = "Day after disturbance", breaks = seq(0, 30, 3), expand = c(0, 0.5)) +
-  scale_y_continuous(expand = expansion(mult = c(0.2, 0.3)))+
-  labs(x = "Day after disturbance",
-       y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")")) +
-  scale_color_manual(name = c("Site"),
-                     limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_fill_manual(name = c("Site"),
-                    limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=11, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "right")+
-  guides(color = guide_legend(override.aes = list(size = 4)),
-         shape = guide_legend(override.aes = list(size = 4)),
-         linetype = guide_legend(title = "Season"))
-
-p4.6
-
-ggsave("Figure_SI_co2_emission.jpeg", dpi=600, width = 18, height = 10, units = "cm")
-
-
-## VPA ####
-vpa <- varpart(
-  summary_respiration_redox$initial_rate,
-  summary_respiration_redox %>%
-    select(median_fluorescence),
-  summary_respiration_redox %>%
-    select(rsg_density)
-)
-
-plot(vpa)
-
-summary(vpa)
-
-
-vpa <- varpart(
-  summary_respiration_redox$initial_rate,
-  summary_respiration_redox %>%
-    select(mean_cumulative_fluo),
-  summary_respiration_redox %>%
-    select(syb_density)
-)
-
-plot(vpa)
-
-summary(vpa)
-
-
-
-## plot correlation ####
-p4.4 <- ggplot(summary_respiration_redox, aes(x = mean_cumulative_fluo, y = initial_rate/15)) +
-  geom_point(aes(color = Site_type, shape = Season, size = as.factor(Day)),alpha = 0.7) +
-  geom_errorbar(aes(ymin = ci_low_R0/15, ymax = ci_high_R0/15, color = Site_type), width = 0) +
-  geom_errorbarh(aes(xmin = mean_cumulative_fluo - mean_cumulative_fluo_se, 
-                     xmax = mean_cumulative_fluo + mean_cumulative_fluo_se, color = Site_type), height = 0) +
-  geom_smooth(method = "lm", se = FALSE, color = "grey10", alpha = 0.2, linetype = 2) +
-  geom_ribbon(stat = "smooth", method = "lm", alpha=0.05, color="grey30", linetype = 2)+
-  #stat_regline_equation(label.y = 87, size = 5)+
-  stat_cor(method = "spearman", size = 5, label.y = 85, p.accuracy = 0.01,
-           aes(label = paste(gsub("italic(R)", "italic(rho)", after_stat(r.label), fixed = TRUE), 
-                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
-                             sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
-  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))+
-  labs(y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")"),
-       x = "Fluorescence intensity (a.u.)",
-       title = "Mean redox activity")+
-  scale_fill_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_size_manual(name="Day",values=day_size)+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 4)),
-         shape = guide_legend(override.aes = list(size = 4)),
-         size = guide_legend(title = "Day"))
-
-p4.4
-
-p4.5 <- ggplot(summary_respiration_redox, aes(x = syb_density, y = initial_rate/15)) +
-  geom_point(aes(color = Site_type, shape = Season, size = as.factor(Day)),alpha = 0.7) +
-  geom_errorbar(aes(ymin = ci_low_R0/15, ymax = ci_high_R0/15, color = Site_type), width = 0) +
-  geom_errorbarh(aes(xmin = syb_density - syb_density_se, 
-                     xmax = syb_density + syb_density_se, color = Site_type), height = 0) +
-  geom_smooth(method = "lm", se = FALSE, color = "grey10", alpha = 0.2, linetype = 2) +
-  geom_ribbon(stat = "smooth", method = "lm", alpha=0.05, color="grey30", linetype = 2)+
-  #stat_regline_equation(label.y = 87, size = 5)+
-  stat_cor(method = "spearman", size = 5, label.y = 85, p.accuracy = 0.001,
-           aes(label = paste(gsub("italic(R)", "italic(rho)", after_stat(r.label), fixed = TRUE), 
-                             gsub("italic(p)", "italic(P)", after_stat(p.label), fixed = TRUE), 
-                             sep = "~`,`~")))+
-  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2)))+
-  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))+
-  #facet_wrap(~Site_type)+
-  labs(y = expression("CO"[2]*" emission ("~ppm~h^{-1}*" g"^{-1}*")"),
-       x = expression("Cell abundance (g"^{-1}*" soil)"),
-       title = "Total cell abundance")+
-  scale_fill_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                    values = c("#b35806","#762a83","#01665e"))+
-  scale_color_manual(name = "Site", limits = c("Agriculture", "Grassland", "Forest"),
-                     values = c("#b35806","#762a83","#01665e"))+
-  scale_size_manual(name="Day",values=day_size)+
-  theme_bw() +
-  theme(panel.background=element_rect(fill='white', color='black'),
-        plot.title = element_text(size=17),
-        axis.title.x =element_text(size=17, color='black'),
-        axis.title.y=element_text(size=17, color='black'),
-        axis.text.x =element_text(size=13, color='black'), 
-        axis.text.y=element_text(size=13, color='black')) +
-  theme(strip.text = element_text(size = 15, color = "black"))+
-  theme(legend.text=element_text(size=15, color='black'),
-        legend.title=element_text(size=15, color='black'),
-        legend.key = element_blank(),
-        legend.position = "none")+
-  guides(color = guide_legend(override.aes = list(size = 4)),
-         shape = guide_legend(override.aes = list(size = 4)),
-         size = guide_legend(title = "Day"))
-
-p4.5
-
-
-p <- plot_grid(
-  p4.4, p4.5,
-  ncol=2, nrow = 1,
-  align="hv",
-  axis="tblr",
-  rel_widths=c(1,1),
-  rel_heights=c(1,1)
-)
-
-p
-
-ggsave("Figure_SI_co2_vs_total_abundance.jpeg", dpi=600, width = 21, height = 10, units = "cm")
 
