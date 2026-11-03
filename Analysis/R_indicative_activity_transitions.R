@@ -16,34 +16,18 @@ all_metrics <- readRDS(all_metrics, "Community/Analysis/phyloseq/all_metrics_sta
 
 ## Multicollinearity analysis ####
 
-inital_vars <- c("density_syb", "density_rsg", "median_fluorescence", "intensity_per_area", "mean_cumulative_fluo", "mean_fluorescence")
+vars <- c("density_syb", "density_rsg", "median_fluorescence", 
+          "Activated_count", "Activated_count_pct", "Activated_abun",
+          "Increased_count", "Increased_count_pct", "Increased_abun")
 
-transition_act_vars <- c("Activated_count", "Activated_abun"
-                         #"Deactivated_count", "Deactivated_abun"
-)
-
-transition_abun_vars <- c("Increased_count", "Increased_abun"
-                          #"Decreased_count", "Decreased_abun"
-)
-
-stab_all_vars <- c("syb_stability", "rsg_stability", "redox_stability", "com_stability",
-                   "syb_stability_3_27", "rsg_stability_3_27", "redox_stability_3_27", "com_stability_3_27")
-
-resis_later_vars <- c("syb_resistance_Day27", "rsg_resistance_Day27", 
-                      "redox_resistance_Day27", "com_resistance_Day27")
-
-
-cor_matrix <- cor(all_metrics[, inital_vars], use = "complete.obs", method = "spearman")
+cor_matrix <- cor(all_metrics[, vars], use = "complete.obs", method = "spearman")
 cor_matrix
 
 
 
 
 
-
-
 ## Models ####
-
 
 ### model 1 ####
 
@@ -84,8 +68,6 @@ pls_model <- estimate_pls(
 
 summary(pls_model)
 
-#plot_scores(pls_model)
-#summary(pls_model)$validity
 
 # Bootstrap
 boot_model <- bootstrap_model(
@@ -98,6 +80,9 @@ boot_model <- bootstrap_model(
 boot_summary <- summary(boot_model, alpha = 0.05)
 
 boot_summary$bootstrapped_paths
+
+
+
 
 
 ### model 2 ####
@@ -142,9 +127,6 @@ pls_model <- estimate_pls(
 summary(pls_model)
 
 
-#plot_scores(pls_model)
-#summary(pls_model)$validity
-
 # Bootstrap
 boot_model <- bootstrap_model(
   seminr_model = pls_model,
@@ -156,6 +138,8 @@ boot_model <- bootstrap_model(
 boot_summary <- summary(boot_model, alpha = 0.05)
 
 boot_summary$bootstrapped_paths
+
+
 
 
 ### model 3 ####
@@ -197,8 +181,7 @@ pls_model <- estimate_pls(
 )
 
 summary(pls_model)
-#plot_scores(pls_model)
-#summary(pls_model)$validity
+
 
 # Bootstrap
 boot_model <- bootstrap_model(
@@ -253,8 +236,6 @@ pls_model <- estimate_pls(
 )
 
 summary(pls_model)
-#plot_scores(pls_model)
-#summary(pls_model)$validity
 
 # Bootstrap
 boot_model <- bootstrap_model(
@@ -318,7 +299,7 @@ pls_model <- estimate_pls(
 )
 
 summary(pls_model)
-#plot_scores(pls_model)
+
 
 # Bootstrap
 boot_model <- bootstrap_model(
@@ -379,7 +360,7 @@ pls_model <- estimate_pls(
 )
 
 summary(pls_model)
-#plot_scores(pls_model)
+
 
 # Bootstrap
 boot_model <- bootstrap_model(
